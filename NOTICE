@@ -1,0 +1,10 @@
+ide
+Copyright 2026 the ide contributors.
+
+This product is a fork of Lapce (https://github.com/lapce/lapce), commit f66ffaa,
+Copyright (c) Lapce contributors, licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It uses Floem (https://github.com/lapce/floem), licensed under the MIT License.
+
+Portions of the VS Code extension-host integration are derived from Visual Studio Code - Open Source
+(https://github.com/microsoft/vscode), Copyright (c) Microsoft Corporation, licensed under the MIT License.
