@@ -11,9 +11,14 @@ impl Directory {
         BaseDirs::new().map(|d| PathBuf::from(d.home_dir()))
     }
 
+    /// `IDE_DATA_DIR` relocates every config/data/cache directory (used by tests and
+    /// benchmarks so they never touch the user's profile).
     #[cfg(not(feature = "portable"))]
     fn project_dirs() -> Option<ProjectDirs> {
-        ProjectDirs::from("dev", "lapce", NAME)
+        if let Some(dir) = std::env::var_os("IDE_DATA_DIR") {
+            return ProjectDirs::from_path(PathBuf::from(dir));
+        }
+        ProjectDirs::from("dev", "ide", NAME)
     }
 
     /// Return path adjacent to lapce executable when built as portable

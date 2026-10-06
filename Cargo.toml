@@ -5,14 +5,14 @@ authors      = { workspace = true }
 edition      = { workspace = true }
 license      = { workspace = true }
 rust-version = { workspace = true }
-default-run  = "lapce"
+default-run  = "ide"
 
 [dependencies]
 lapce-app   = { path = "./lapce-app" }
 lapce-proxy = { path = "./lapce-proxy" }
 
 [[bin]]
-name = "lapce"
+name = "ide"
 path = "lapce-app/src/bin/lapce.rs"
 
 [[bin]]

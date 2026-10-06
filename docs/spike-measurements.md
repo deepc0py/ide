@@ -7,3 +7,5 @@ RSS of matched processes and all descendants (shared pages are double-counted, s
 | Candidate | Extensions | Processes | Total RSS |
 |---|---|---|---|
 | VS Code 1.x stable (Electron), fresh profile | none (built-ins only) | 39 | 6441 MB |
+| Lapce 0.4.6 (upstream), `lapce <path>` x8 | n/a | 17 | 417 MB — **but only 1 window**: upstream forwards folders as tabs of the existing window |
+| ide (Lapce fork, folders open as new windows), 8 real windows (verified via CGWindowList) | none yet | 17 (1 ide + 16 shells) | 437 MB |

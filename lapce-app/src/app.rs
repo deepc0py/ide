@@ -4064,11 +4064,20 @@ pub fn launch() {
         let app_data = app_data.clone();
         create_effect(move |_| {
             if let Some(CoreNotification::OpenPaths { paths }) = notification.get() {
-                if let Some(window_tab) = app_data.active_window_tab() {
-                    window_tab.open_paths(&paths);
-                    // focus window after open doc
-                    floem::action::focus_window();
+                // One window per folder (worktree): folders never become tabs of an
+                // existing window.
+                let (folders, files): (Vec<PathObject>, Vec<PathObject>) =
+                    paths.into_iter().partition(|p| p.is_dir);
+                for folder in folders {
+                    app_data.new_window(Some(folder.path));
                 }
+                if !files.is_empty() {
+                    if let Some(window_tab) = app_data.active_window_tab() {
+                        window_tab.open_paths(&files);
+                    }
+                }
+                // focus window after open doc
+                floem::action::focus_window();
             }
         });
         std::thread::Builder::new()

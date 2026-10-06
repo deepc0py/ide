@@ -26,7 +26,7 @@ fn main() -> Result<()> {
 
     #[rustfmt::skip]
     let meta = format!(r#"
-        pub const NAME: &str = "Lapce-{branch}";
+        pub const NAME: &str = "ide-{branch}";
         pub const VERSION: &str = "{version}";
         pub const RELEASE: ReleaseType = ReleaseType::{branch};
     "#);
