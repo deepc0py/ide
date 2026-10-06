@@ -1,0 +1,61 @@
+{
+  "generatedAt": "2026-10-06T20:34:27.555Z",
+  "openVsx": "https://open-vsx.org",
+  "targetPlatform": "darwin-arm64",
+  "extensions": {
+    "dbaeumer.vscode-eslint": {
+      "id": "dbaeumer.vscode-eslint",
+      "namespace": "dbaeumer",
+      "name": "vscode-eslint",
+      "target": "universal",
+      "version": "3.0.34",
+      "download": "https://open-vsx.org/api/dbaeumer/vscode-eslint/3.0.34/file/dbaeumer.vscode-eslint-3.0.34.vsix",
+      "sha256": "ca5334d46f6a39079e751ef4601bfc9f86bc3a46483e87291ec609239d161308"
+    },
+    "esbenp.prettier-vscode": {
+      "id": "esbenp.prettier-vscode",
+      "namespace": "esbenp",
+      "name": "prettier-vscode",
+      "target": "universal",
+      "version": "12.4.0",
+      "download": "https://open-vsx.org/api/esbenp/prettier-vscode/12.4.0/file/esbenp.prettier-vscode-12.4.0.vsix",
+      "sha256": "fb730ea4306d09cdc0a3aaa9e9baae28058cc97a4fbfce8b056b377a0639a9fe"
+    },
+    "eamodio.gitlens": {
+      "id": "eamodio.gitlens",
+      "namespace": "eamodio",
+      "name": "gitlens",
+      "target": "universal",
+      "version": "2026.10.60516",
+      "download": "https://open-vsx.org/api/eamodio/gitlens/2026.10.60516/file/eamodio.gitlens-2026.10.60516.vsix",
+      "sha256": "9ba747739f6774cd2a867f871821ea964887e028f9ce2dabae9bd34e2a20f16d"
+    },
+    "ms-python.python": {
+      "id": "ms-python.python",
+      "namespace": "ms-python",
+      "name": "python",
+      "target": "universal",
+      "version": "2026.4.0",
+      "download": "https://open-vsx.org/api/ms-python/python/2026.4.0/file/ms-python.python-2026.4.0.vsix",
+      "sha256": "232aeafb01f069824fdd92d3e628c1c442bbcfa1d3cc945ff97076340bb2b4a6"
+    },
+    "rust-lang.rust-analyzer": {
+      "id": "rust-lang.rust-analyzer",
+      "namespace": "rust-lang",
+      "name": "rust-analyzer",
+      "target": "darwin-arm64",
+      "version": "0.4.3074",
+      "download": "https://open-vsx.org/api/rust-lang/rust-analyzer/darwin-arm64/0.4.3074/file/rust-lang.rust-analyzer-0.4.3074@darwin-arm64.vsix",
+      "sha256": "11042d9964a254ff163ebf1a5d9451435dbe7b33607ac2c55ddb00ccb5778aa3"
+    },
+    "anthropic.claude-code": {
+      "id": "anthropic.claude-code",
+      "namespace": "Anthropic",
+      "name": "claude-code",
+      "target": "darwin-arm64",
+      "version": "2.1.292",
+      "download": "https://open-vsx.org/api/Anthropic/claude-code/darwin-arm64/2.1.292/file/Anthropic.claude-code-2.1.292@darwin-arm64.vsix",
+      "sha256": "ec78aa4d93c5a620eda2c70029b0c6f25935a0b669e4c04c535d7d1a23fe354f"
+    }
+  }
+}
