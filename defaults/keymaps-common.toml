@@ -90,6 +90,23 @@ when = "!file_explorer_focus"
 key = "F12"
 command = "goto_definition"
 
+# VS Code parity
+[[keymaps]]
+key = "shift+F12"
+command = "find_references"
+
+[[keymaps]]
+key = "shift+alt+f"
+command = "format_document"
+
+[[keymaps]]
+key = "F7"
+command = "next_diff"
+
+[[keymaps]]
+key = "shift+F7"
+command = "previous_diff"
+
 [[keymaps]]
 key = "g f"
 command = "show_code_actions"

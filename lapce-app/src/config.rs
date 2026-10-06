@@ -39,6 +39,7 @@ pub mod icon_theme;
 pub mod svg;
 pub mod terminal;
 pub mod ui;
+pub mod vscode_theme;
 pub mod watcher;
 
 pub const LOGO: &str = include_str!("../../extra/images/logo.svg");
@@ -321,6 +322,25 @@ impl LapceConfig {
             Self::load_color_theme_from_str(DEFAULT_DARK_THEME).unwrap();
         themes.insert(name.to_lowercase(), (name, theme));
 
+        // Bundled VS Code default themes (Dark Modern is the shipped default).
+        for theme in [
+            vscode_theme::default_dark_modern(),
+            vscode_theme::default_light_modern(),
+        ] {
+            if let Some((key, entry)) = Self::vscode_color_theme_entry(&theme) {
+                themes.insert(key, entry);
+            }
+        }
+
+        // Color themes contributed by VS Code extensions (`contributes.themes`).
+        for dir in Self::vscode_extensions_dirs() {
+            for theme in vscode_theme::load_extension_themes(&dir) {
+                if let Some((key, entry)) = Self::vscode_color_theme_entry(&theme) {
+                    themes.insert(key, entry);
+                }
+            }
+        }
+
         themes
     }
 
@@ -426,10 +446,58 @@ impl LapceConfig {
                 .filter_map(|entry| {
                     entry
                         .ok()
-                        .and_then(|entry| Self::load_color_theme(&entry.path()))
+                        .and_then(|entry| Self::load_color_theme_any(&entry.path()))
                 })
                 .collect();
         Some(themes)
+    }
+
+    /// Load a color theme file from `path`, dispatching on extension: `.json`/
+    /// `.jsonc` are treated as VS Code color themes and converted, everything
+    /// else as a native `.toml` theme.
+    fn load_color_theme_any(
+        path: &Path,
+    ) -> Option<(String, (String, config::Config))> {
+        if !path.is_file() {
+            return None;
+        }
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("json") | Some("jsonc") => {
+                let theme = vscode_theme::from_path(path, None).ok()?;
+                Self::vscode_color_theme_entry(&theme)
+            }
+            _ => Self::load_color_theme(path),
+        }
+    }
+
+    /// Serialize a converted VS Code theme into the `config::Config` form the
+    /// rest of the theme pipeline consumes, keyed by its lowercased name.
+    fn vscode_color_theme_entry(
+        theme: &color_theme::ColorThemeConfig,
+    ) -> Option<(String, (String, config::Config))> {
+        #[derive(serde::Serialize)]
+        struct ThemeFile<'a> {
+            #[serde(rename = "color-theme")]
+            color_theme: &'a color_theme::ColorThemeConfig,
+        }
+        let toml_str =
+            toml::to_string(&ThemeFile { color_theme: theme }).ok()?;
+        let (name, config) = Self::load_color_theme_from_str(&toml_str)?;
+        Some((name.to_lowercase(), (name, config)))
+    }
+
+    /// Directories scanned for VS Code extensions that contribute color themes.
+    fn vscode_extensions_dirs() -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+        if let Ok(dir) = std::env::var("IDE_EXTENSIONS_DIR") {
+            if !dir.is_empty() {
+                dirs.push(PathBuf::from(dir));
+            }
+        }
+        if let Some(dir) = Directory::data_local_directory() {
+            dirs.push(dir.join("extensions"));
+        }
+        dirs
     }
 
     fn load_color_theme(path: &Path) -> Option<(String, (String, config::Config))> {

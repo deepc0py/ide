@@ -2,7 +2,7 @@
 
 [core]
 modal = false
-color-theme = "Lapce Dark"
+color-theme = "Dark Modern"
 icon-theme = "Lapce Codicons"
 custom-titlebar = true
 file-explorer-double-click = false

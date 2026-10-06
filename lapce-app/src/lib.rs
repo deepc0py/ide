@@ -44,6 +44,8 @@ pub mod wave;
 pub mod web_link;
 pub mod window;
 pub mod window_tab;
+#[cfg(all(feature = "webview", target_os = "macos"))]
+pub mod webview_view;
 pub mod workspace;
 
 #[cfg(windows)]

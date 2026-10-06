@@ -1,6 +1,7 @@
 pub mod catalog;
 pub mod dap;
 pub mod lsp;
+pub mod lsp_config;
 pub mod psp;
 pub mod wasi;
 
@@ -214,6 +215,9 @@ pub enum PluginCatalogNotification {
         program: String,
         args: Option<Vec<String>>,
     },
+    /// Attach a language server to the current workspace at runtime (used by the
+    /// shared extension host's per-workspace LSP bridge).
+    AttachLspServer(self::lsp_config::LspServerConfig),
     Shutdown,
 }
 
@@ -1330,6 +1334,14 @@ impl PluginCatalogRpcHandler {
 
     pub fn unactivated_volts(&self, volts: Vec<VoltMetadata>) -> Result<()> {
         self.catalog_notification(PluginCatalogNotification::UnactivatedVolts(volts))
+    }
+
+    pub fn attach_lsp_server(&self, config: lsp_config::LspServerConfig) {
+        if let Err(err) = self.catalog_notification(
+            PluginCatalogNotification::AttachLspServer(config),
+        ) {
+            tracing::error!("{:?}", err);
+        }
     }
 
     pub fn plugin_server_loaded(

@@ -46,6 +46,7 @@ use crate::{
 };
 pub mod edit;
 pub mod highlight;
+pub mod textmate;
 pub mod util;
 
 const TREE_SITTER_MATCH_LIMIT: u32 = 256;
@@ -1027,6 +1028,28 @@ impl Syntax {
         self.normal_lines = normal_lines;
         self.styles = styles;
         self.text = new_text
+    }
+
+    /// Highlight using a TextMate grammar instead of tree-sitter. This is a
+    /// non-breaking fallback path used when no tree-sitter grammar is available
+    /// for the language; it only updates `styles`/`text`/`rev` and leaves the
+    /// tree-sitter layers (and lens) untouched.
+    pub fn parse_textmate(
+        &mut self,
+        new_rev: u64,
+        new_text: Rope,
+        grammar: &textmate::TextMateGrammar,
+    ) {
+        let lens = Self::lens_from_normal_lines(
+            new_text.line_of_offset(new_text.len()) + 1,
+            self.line_height,
+            self.lens_height,
+            &self.normal_lines,
+        );
+        self.styles = Some(grammar.highlight_rope(&new_text));
+        self.lens = lens;
+        self.rev = new_rev;
+        self.text = new_text;
     }
 
     pub fn update_lens_height(&mut self, line_height: usize, lens_height: usize) {

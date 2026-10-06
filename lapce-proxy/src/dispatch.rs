@@ -44,7 +44,10 @@ use parking_lot::Mutex;
 
 use crate::{
     buffer::{Buffer, get_mod_time, load_file},
-    plugin::{PluginCatalogRpcHandler, catalog::PluginCatalog},
+    plugin::{
+        PluginCatalogRpcHandler, catalog::PluginCatalog,
+        lsp_config::LspServerConfig,
+    },
     terminal::{Terminal, TerminalSender},
     watcher::{FileWatcher, Notify, WatchToken},
 };
@@ -397,6 +400,23 @@ impl ProxyHandler for Dispatcher {
                     None,
                     false,
                 );
+            }
+            AttachLspServer {
+                name,
+                socket,
+                languages,
+                extensions,
+            } => {
+                self.catalog_rpc.attach_lsp_server(LspServerConfig {
+                    name,
+                    command: None,
+                    args: Vec::new(),
+                    languages,
+                    extensions,
+                    socket: Some(socket),
+                    install: None,
+                    options: None,
+                });
             }
         }
     }

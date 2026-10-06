@@ -362,6 +362,15 @@ pub enum ProxyNotification {
         path: PathBuf,
         breakpoints: Vec<SourceBreakpoint>,
     },
+    /// Attach a language server to the current workspace at runtime by connecting
+    /// to a unix socket that already speaks LSP. Used by the shared extension
+    /// host's per-workspace LSP bridge.
+    AttachLspServer {
+        name: String,
+        socket: PathBuf,
+        languages: Vec<String>,
+        extensions: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -610,6 +619,21 @@ impl ProxyRpcHandler {
 
     pub fn lsp_cancel(&self, id: i32) {
         self.notification(ProxyNotification::LspCancel { id });
+    }
+
+    pub fn attach_lsp_server(
+        &self,
+        name: String,
+        socket: PathBuf,
+        languages: Vec<String>,
+        extensions: Vec<String>,
+    ) {
+        self.notification(ProxyNotification::AttachLspServer {
+            name,
+            socket,
+            languages,
+            extensions,
+        });
     }
 
     pub fn git_init(&self) {

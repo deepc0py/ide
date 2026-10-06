@@ -1,7 +1,7 @@
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use std::{
-    io::{BufRead, BufReader, BufWriter, Write},
+    io::{BufRead, BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
     process::{self, Child, Command, Stdio},
     sync::Arc,
@@ -58,10 +58,27 @@ pub enum LspRpc {
     },
 }
 
+/// How a built-in / runtime-attached language server is reached.
+pub enum LspServer {
+    /// Spawn `program` (resolved on `PATH`) with `args` and speak LSP over its
+    /// stdio.
+    Command { program: String, args: Vec<String> },
+    /// Connect to an already-running language server over a unix socket and speak
+    /// LSP over it. Used by the shared extension host's per-workspace LSP bridge.
+    Socket(PathBuf),
+}
+
+/// Handle used to tear a language server down.
+enum LspShutdown {
+    Process(Child),
+    #[cfg(unix)]
+    Socket(std::os::unix::net::UnixStream),
+}
+
 pub struct LspClient {
     plugin_rpc: PluginCatalogRpcHandler,
     server_rpc: PluginServerRpcHandler,
-    process: Child,
+    shutdown: LspShutdown,
     workspace: Option<PathBuf>,
     host: PluginHostHandler,
     options: Option<Value>,
@@ -180,33 +197,33 @@ impl LspClient {
         spawned_by: Option<PluginId>,
         plugin_id: Option<PluginId>,
         pwd: Option<PathBuf>,
-        server_uri: Url,
-        args: Vec<String>,
+        server: LspServer,
         options: Option<Value>,
     ) -> Result<Self> {
-        let server = match server_uri.scheme() {
-            "file" => {
-                let path = server_uri.to_file_path().map_err(|_| anyhow!(""))?;
-                #[cfg(unix)]
-                if let Err(err) = std::process::Command::new("chmod")
-                    .arg("+x")
-                    .arg(&path)
-                    .output()
-                {
-                    tracing::error!("{:?}", err);
+        let (writer, stdout_reader, stderr_reader, shutdown, server_name) =
+            match server {
+                LspServer::Command { program, args } => {
+                    let mut process =
+                        Self::process(workspace.as_ref(), &program, &args)?;
+                    let stdin = process.stdin.take().unwrap();
+                    let stdout = process.stdout.take().unwrap();
+                    let stderr = process.stderr.take().unwrap();
+                    let writer: Box<dyn Write + Send> = Box::new(stdin);
+                    let stdout_reader: Box<dyn Read + Send> = Box::new(stdout);
+                    let stderr_reader: Option<Box<dyn Read + Send>> =
+                        Some(Box::new(stderr));
+                    (
+                        writer,
+                        stdout_reader,
+                        stderr_reader,
+                        LspShutdown::Process(process),
+                        program,
+                    )
                 }
-                path.to_str().ok_or_else(|| anyhow!(""))?.to_string()
-            }
-            "urn" => server_uri.path().to_string(),
-            _ => return Err(anyhow!("uri not supported")),
-        };
+                LspServer::Socket(path) => Self::connect_socket(path)?,
+            };
 
-        let mut process = Self::process(workspace.as_ref(), &server, &args)?;
-        let stdin = process.stdin.take().unwrap();
-        let stdout = process.stdout.take().unwrap();
-        let stderr = process.stderr.take().unwrap();
-
-        let mut writer = Box::new(BufWriter::new(stdin));
+        let mut writer = BufWriter::new(writer);
         let (io_tx, io_rx) = crossbeam_channel::unbounded();
         let server_rpc = PluginServerRpcHandler::new(
             volt_id.clone(),
@@ -241,8 +258,9 @@ impl LspClient {
         let core_rpc = plugin_rpc.core_rpc.clone();
         let volt_id_closure = volt_id.clone();
         let name = volt_display_name.clone();
+        let server_name_closure = server_name.clone();
         thread::spawn(move || {
-            let mut reader = Box::new(BufReader::new(stdout));
+            let mut reader = BufReader::new(stdout_reader);
             loop {
                 match read_message(&mut reader) {
                     Ok(message_str) => {
@@ -262,7 +280,7 @@ impl LspClient {
                     Err(_err) => {
                         core_rpc.log(
                             lapce_rpc::core::LogLevel::Error,
-                            format!("lsp server {server} stopped!"),
+                            format!("lsp server {server_name_closure} stopped!"),
                             Some(format!(
                                 "lapce_proxy::plugin::lsp::{}::{}::stopped",
                                 volt_id_closure.author, volt_id_closure.name
@@ -274,32 +292,34 @@ impl LspClient {
             }
         });
 
-        let core_rpc = plugin_rpc.core_rpc.clone();
-        let volt_id_closure = volt_id.clone();
-        thread::spawn(move || {
-            let mut reader = Box::new(BufReader::new(stderr));
-            loop {
-                let mut line = String::new();
-                match reader.read_line(&mut line) {
-                    Ok(n) => {
-                        if n == 0 {
+        if let Some(stderr_reader) = stderr_reader {
+            let core_rpc = plugin_rpc.core_rpc.clone();
+            let volt_id_closure = volt_id.clone();
+            thread::spawn(move || {
+                let mut reader = BufReader::new(stderr_reader);
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line) {
+                        Ok(n) => {
+                            if n == 0 {
+                                return;
+                            }
+                            core_rpc.log(
+                                lapce_rpc::core::LogLevel::Trace,
+                                line.trim_end().to_string(),
+                                Some(format!(
+                                    "lapce_proxy::plugin::lsp::{}::{}::stderr",
+                                    volt_id_closure.author, volt_id_closure.name
+                                )),
+                            );
+                        }
+                        Err(_) => {
                             return;
                         }
-                        core_rpc.log(
-                            lapce_rpc::core::LogLevel::Trace,
-                            line.trim_end().to_string(),
-                            Some(format!(
-                                "lapce_proxy::plugin::lsp::{}::{}::stderr",
-                                volt_id_closure.author, volt_id_closure.name
-                            )),
-                        );
-                    }
-                    Err(_) => {
-                        return;
                     }
                 }
-            }
-        });
+            });
+        }
 
         let host = PluginHostHandler::new(
             workspace.clone(),
@@ -315,11 +335,45 @@ impl LspClient {
         Ok(Self {
             plugin_rpc,
             server_rpc,
-            process,
+            shutdown,
             workspace,
             host,
             options,
         })
+    }
+
+    #[cfg(unix)]
+    #[allow(clippy::type_complexity)]
+    fn connect_socket(
+        path: PathBuf,
+    ) -> Result<(
+        Box<dyn Write + Send>,
+        Box<dyn Read + Send>,
+        Option<Box<dyn Read + Send>>,
+        LspShutdown,
+        String,
+    )> {
+        use std::os::unix::net::UnixStream;
+        let stream = UnixStream::connect(&path)?;
+        let writer: Box<dyn Write + Send> = Box::new(stream.try_clone()?);
+        let reader: Box<dyn Read + Send> = Box::new(stream.try_clone()?);
+        let name = format!("socket:{}", path.display());
+        Ok((writer, reader, None, LspShutdown::Socket(stream), name))
+    }
+
+    #[cfg(not(unix))]
+    #[allow(clippy::type_complexity)]
+    fn connect_socket(
+        path: PathBuf,
+    ) -> Result<(
+        Box<dyn Write + Send>,
+        Box<dyn Read + Send>,
+        Option<Box<dyn Read + Send>>,
+        LspShutdown,
+        String,
+    )> {
+        let _ = path;
+        Err(anyhow!("socket lsp servers are only supported on unix"))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -336,6 +390,51 @@ impl LspClient {
         args: Vec<String>,
         options: Option<Value>,
     ) -> Result<PluginId> {
+        let program = match server_uri.scheme() {
+            "file" => {
+                let path = server_uri.to_file_path().map_err(|_| anyhow!(""))?;
+                #[cfg(unix)]
+                if let Err(err) = std::process::Command::new("chmod")
+                    .arg("+x")
+                    .arg(&path)
+                    .output()
+                {
+                    tracing::error!("{:?}", err);
+                }
+                path.to_str().ok_or_else(|| anyhow!(""))?.to_string()
+            }
+            "urn" => server_uri.path().to_string(),
+            _ => return Err(anyhow!("uri not supported")),
+        };
+        Self::start_server(
+            plugin_rpc,
+            document_selector,
+            workspace,
+            volt_id,
+            volt_display_name,
+            spawned_by,
+            plugin_id,
+            pwd,
+            LspServer::Command { program, args },
+            options,
+        )
+    }
+
+    /// Start a language server from an explicit [`LspServer`] transport (a command
+    /// on `PATH` or a unix socket) and run its mainloop on a background thread.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_server(
+        plugin_rpc: PluginCatalogRpcHandler,
+        document_selector: DocumentSelector,
+        workspace: Option<PathBuf>,
+        volt_id: VoltID,
+        volt_display_name: String,
+        spawned_by: Option<PluginId>,
+        plugin_id: Option<PluginId>,
+        pwd: Option<PathBuf>,
+        server: LspServer,
+        options: Option<Value>,
+    ) -> Result<PluginId> {
         let mut lsp = Self::new(
             plugin_rpc,
             document_selector,
@@ -345,8 +444,7 @@ impl LspClient {
             spawned_by,
             plugin_id,
             pwd,
-            server_uri,
-            args,
+            server,
             options,
         )?;
         let plugin_id = lsp.server_rpc.plugin_id;
@@ -429,11 +527,21 @@ impl LspClient {
     }
 
     fn shutdown(&mut self) {
-        if let Err(err) = self.process.kill() {
-            tracing::error!("{:?}", err);
-        }
-        if let Err(err) = self.process.wait() {
-            tracing::error!("{:?}", err);
+        match &mut self.shutdown {
+            LspShutdown::Process(child) => {
+                if let Err(err) = child.kill() {
+                    tracing::error!("{:?}", err);
+                }
+                if let Err(err) = child.wait() {
+                    tracing::error!("{:?}", err);
+                }
+            }
+            #[cfg(unix)]
+            LspShutdown::Socket(stream) => {
+                if let Err(err) = stream.shutdown(std::net::Shutdown::Both) {
+                    tracing::error!("{:?}", err);
+                }
+            }
         }
     }
 

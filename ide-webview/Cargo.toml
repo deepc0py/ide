@@ -1,0 +1,28 @@
+[package]
+name         = "ide-webview"
+version      = { workspace = true }
+authors      = { workspace = true }
+edition      = { workspace = true }
+license      = { workspace = true }
+rust-version = { workspace = true }
+description  = "Native WKWebView host for VS Code extension webviews, embedded as a child of a floem/winit window."
+
+[dependencies]
+serde_json         = { workspace = true }
+regex              = { workspace = true }
+thiserror          = { workspace = true }
+raw-window-handle  = "0.6"
+percent-encoding   = "2.3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+wry = "0.57"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+tao = "0.37"
+
+[[example]]
+name = "demo"
+path = "examples/demo.rs"

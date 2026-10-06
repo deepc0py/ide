@@ -303,3 +303,49 @@ command = "palette.workspace_symbol"
 [[keymaps]]
 key = "ctrl+g"
 command = "palette.line"
+
+# --------------------------------- VS Code parity ------------------------------------
+
+[[keymaps]]
+key = "meta+b"
+command = "toggle_panel_left_visual"
+
+[[keymaps]]
+key = "meta+j"
+command = "toggle_panel_bottom_visual"
+
+[[keymaps]]
+key = "meta+shift+d"
+command = "toggle_debug_visual"
+
+[[keymaps]]
+key = "ctrl+shift+g"
+command = "toggle_source_control_focus"
+
+[[keymaps]]
+key = "meta+g"
+command = "search_forward"
+
+[[keymaps]]
+key = "meta+shift+g"
+command = "search_backward"
+
+[[keymaps]]
+key = "meta+alt+f"
+command = "focus_replace_editor"
+
+[[keymaps]]
+key = "meta+F12"
+command = "go_to_implementation"
+
+[[keymaps]]
+key = "meta+shift+]"
+command = "next_editor_tab"
+
+[[keymaps]]
+key = "meta+shift+["
+command = "previous_editor_tab"
+
+[[keymaps]]
+key = "meta+k meta+i"
+command = "show_hover"

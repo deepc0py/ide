@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
-    collections::HashMap,
-    path::PathBuf,
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -29,6 +29,8 @@ use serde_json::Value;
 use super::{
     PluginCatalogNotification, PluginCatalogRpcHandler,
     dap::{DapClient, DapRpcHandler, DebuggerData},
+    lsp::LspClient,
+    lsp_config::{LspServerConfig, load_lsp_server_configs},
     psp::{CloneableCallback, PluginServerRpc, PluginServerRpcHandler, RpcCallback},
     wasi::{load_all_volts, start_volt},
 };
@@ -45,6 +47,8 @@ pub struct PluginCatalog {
     plugin_configurations: HashMap<String, HashMap<String, serde_json::Value>>,
     unactivated_volts: HashMap<VoltID, VoltMetadata>,
     open_files: HashMap<PathBuf, String>,
+    lsp_configs: Vec<LspServerConfig>,
+    started_lsp: HashSet<String>,
 }
 
 impl PluginCatalog {
@@ -64,6 +68,10 @@ impl PluginCatalog {
             debuggers: HashMap::new(),
             unactivated_volts: HashMap::new(),
             open_files: HashMap::new(),
+            lsp_configs: load_lsp_server_configs(
+                lapce_core::directory::Directory::config_directory(),
+            ),
+            started_lsp: HashSet::new(),
         };
 
         thread::spawn(move || {
@@ -307,6 +315,7 @@ impl PluginCatalog {
         self.start_unactivated_volts(to_be_activated);
 
         let path = document.uri.to_file_path().ok();
+        self.maybe_start_lsp(&document.language_id, path.as_deref());
         for (_, plugin) in self.plugins.iter() {
             plugin.server_notification(
                 DidOpenTextDocument::METHOD,
@@ -318,6 +327,67 @@ impl PluginCatalog {
                 true,
             );
         }
+    }
+
+    /// Start any built-in language server whose config matches this document and
+    /// has not already been started for this workspace.
+    fn maybe_start_lsp(&mut self, language_id: &str, path: Option<&Path>) {
+        let to_start: Vec<LspServerConfig> = self
+            .lsp_configs
+            .iter()
+            .filter(|config| {
+                !self.started_lsp.contains(&config.name)
+                    && config.matches(language_id, path)
+            })
+            .cloned()
+            .collect();
+        for config in to_start {
+            self.started_lsp.insert(config.name.clone());
+            self.start_lsp_config(config);
+        }
+    }
+
+    /// Spawn (or connect to) the language server described by `config` on a
+    /// background thread.
+    fn start_lsp_config(&self, config: LspServerConfig) {
+        let workspace = self.workspace.clone();
+        let plugin_rpc = self.plugin_rpc.clone();
+        thread::spawn(move || {
+            // For spawned (non-socket) defaults, install the server if missing.
+            if config.socket.is_none() {
+                config.ensure_installed();
+            }
+            let Some(server) = config.transport() else {
+                tracing::error!(
+                    "lsp server {} has neither command nor socket",
+                    config.name
+                );
+                return;
+            };
+            let document_selector = config.document_selector();
+            let volt_id = VoltID {
+                author: "builtin".to_string(),
+                name: config.name.clone(),
+            };
+            if let Err(err) = LspClient::start_server(
+                plugin_rpc,
+                document_selector,
+                workspace.clone(),
+                volt_id,
+                config.name.clone(),
+                None,
+                None,
+                workspace,
+                server,
+                config.resolved_options(),
+            ) {
+                tracing::error!(
+                    "failed to start lsp server {}: {:?}",
+                    config.name,
+                    err
+                );
+            }
+        });
     }
 
     pub fn handle_did_save_text_document(
@@ -745,6 +815,10 @@ impl PluginCatalog {
                         args,
                     },
                 );
+            }
+            AttachLspServer(config) => {
+                self.started_lsp.insert(config.name.clone());
+                self.start_lsp_config(config);
             }
             Shutdown => {
                 for (_, plugin) in self.plugins.iter() {

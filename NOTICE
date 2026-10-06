@@ -8,3 +8,11 @@ It uses Floem (https://github.com/lapce/floem), licensed under the MIT License.
 
 Portions of the VS Code extension-host integration are derived from Visual Studio Code - Open Source
 (https://github.com/microsoft/vscode), Copyright (c) Microsoft Corporation, licensed under the MIT License.
+
+The bundled default color themes (defaults/vscode-themes/*.json: Dark Modern,
+Light Modern and their Dark+/Light+/VS include chains) are from VS Code's
+theme-defaults extension, Copyright (c) Microsoft Corporation, MIT License.
+Bundled TextMate grammars (lapce-core/grammars/) are from VS Code's built-in
+language extensions: JSON and CSS grammars are MIT (Copyright (c) Microsoft
+Corporation); the INI grammar is from textmate/ini.tmbundle under its permissive
+TextMate Bundle license.

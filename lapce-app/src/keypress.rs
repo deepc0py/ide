@@ -3,6 +3,7 @@ mod key;
 pub mod keymap;
 mod loader;
 mod press;
+mod vscode;
 
 use std::{path::PathBuf, rc::Rc, str::FromStr, time::SystemTime};
 
@@ -595,6 +596,24 @@ impl KeyPressData {
             }
         }
 
+        // VS Code compatibility: import a `keybindings.json` from the config
+        // directory (if present) through the same loader path so prefix maps
+        // stay consistent.
+        if let Some(path) = vscode::keybindings_file() {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                let imported = vscode::import_vscode_keybindings(&content);
+                if !imported.is_empty() {
+                    let generated = vscode::imported_to_toml(&imported);
+                    if let Err(err) = loader.load_from_str(&generated, is_modal) {
+                        trace!(
+                            TraceLevel::WARN,
+                            "Failed to load vscode keybindings {path:?}: {err}"
+                        );
+                    }
+                }
+            }
+        }
+
         Ok(loader.finalize())
     }
 
@@ -698,4 +717,50 @@ fn get_modes(toml_keymap: &toml_edit::Table) -> Modes {
         .and_then(|v| v.as_str())
         .map(Modes::parse)
         .unwrap_or_else(Modes::empty)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The VS Code macOS default preset (common + macOS defaults) parses and
+    /// resolves the expected high-value bindings.
+    #[test]
+    fn test_macos_default_preset() {
+        let mut loader = KeyMapLoader::new();
+        loader
+            .load_from_str(DEFAULT_KEYMAPS_COMMON, false)
+            .expect("common defaults parse");
+        loader
+            .load_from_str(DEFAULT_KEYMAPS_MACOS, false)
+            .expect("macOS defaults parse");
+        let (keymaps, command_keymaps) = loader.finalize();
+
+        // ctrl+` toggles the terminal (defined in the common defaults).
+        let backtick = KeyMapPress::parse("ctrl+`");
+        assert!(
+            keymaps
+                .get(&backtick)
+                .map(|ms| ms
+                    .iter()
+                    .any(|m| m.command == "toggle_terminal_focus"))
+                .unwrap_or(false),
+            "ctrl+` should toggle the terminal"
+        );
+
+        // meta+p opens the file palette (macOS defaults).
+        let palette = KeyMapPress::parse("meta+p");
+        assert!(
+            keymaps
+                .get(&palette)
+                .map(|ms| ms.iter().any(|m| m.command == "palette"))
+                .unwrap_or(false),
+            "meta+p should open the palette"
+        );
+
+        // VS Code parity additions resolve to real ide commands.
+        assert!(command_keymaps.contains_key("toggle_panel_left_visual"));
+        assert!(command_keymaps.contains_key("find_references"));
+        assert!(command_keymaps.contains_key("format_document"));
+    }
 }

@@ -67,3 +67,8 @@ git = "https://github.com/lapce/wasi-experimental-http"
 [target.'cfg(target_os = "macos")'.dependencies.locale_config]
 git    = "https://github.com/lapce/locale_config.git"
 branch = "lapce"
+
+[dev-dependencies]
+# Same fuzzy matcher the palette uses, so the fuzzy-open test exercises the real
+# ranking the UI relies on.
+nucleo = "0.5.0"
