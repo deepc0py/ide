@@ -1,6 +1,9 @@
 // Control process for the shared extension host. Owns the control unix socket
-// (LSP-style Content-Length framed JSON-RPC 2.0) and one worker_thread per open
-// workspace. See the architecture contract for the control verbs.
+// (LSP-style Content-Length framed JSON-RPC 2.0) and ONE shared worker_thread (the
+// extension-host isolate) that hosts every open window as a single multi-root
+// workspace. Each `host/openWorkspace` still returns a per-window LSP socket, so
+// the Rust client's control/LSP contract is unchanged; internally the windows
+// share one extension host (so each extension + language server loads once).
 import * as net from 'node:net';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -42,52 +45,68 @@ function discoverExtensionDirs(): string[] {
 	return out;
 }
 
-interface WorkspaceHandle {
-	id: string;
-	worker: Worker;
-	lspSocket: string;
-	statsWaiters: Array<(heapUsed: number) => void>;
-}
+// ---- the single shared extension-host worker --------------------------------
+
+interface WorkspaceHandle { id: string; lspSocket: string; folders: string[]; }
 
 const workspaces = new Map<string, WorkspaceHandle>();
+const readyWaiters = new Map<string, () => void>();
+const statsWaiters: Array<(heapUsed: number) => void> = [];
+let worker: Worker | null = null;
+let booted: Promise<void> | null = null;
 let counter = 0;
 
-function openWorkspace(folders: string[]): Promise<{ workspaceId: string; lspSocket: string }> {
+function ensureWorker(): Promise<void> {
+	if (booted) { return booted; }
+	const extensionDirs = discoverExtensionDirs();
+	const w = new Worker(workerPath, {
+		workerData: { dataDir, logsDir: path.join(dataDir, 'logs'), home, appRoot, version, extensionDirs },
+	});
+	worker = w;
+	const { promise, resolve, reject } = Promise.withResolvers<void>();
+	booted = promise;
+	w.on('message', (msg: { type: string; id?: string; message?: string; heapUsed?: number }) => {
+		if (msg.type === 'booted') { resolve(); }
+		else if (msg.type === 'log') { console.error(msg.message); }
+		else if (msg.type === 'workspaceReady') { readyWaiters.get(msg.id ?? '')?.(); readyWaiters.delete(msg.id ?? ''); }
+		else if (msg.type === 'stats') { statsWaiters.splice(0).forEach((fn) => fn(msg.heapUsed ?? 0)); }
+	});
+	w.on('error', (err) => { console.error('[host] isolate worker error:', err); reject(err); });
+	w.on('exit', () => { worker = null; booted = null; });
+	return promise;
+}
+
+async function openWorkspace(folders: string[]): Promise<{ workspaceId: string; lspSocket: string }> {
+	await ensureWorker();
 	const id = `ws-${++counter}`;
 	const lspSocket = path.join(dataDir, `lsp-${id}.sock`);
-	const extensionDirs = discoverExtensionDirs();
-	const { promise, resolve, reject } = Promise.withResolvers<{ workspaceId: string; lspSocket: string }>();
-	const worker = new Worker(workerPath, {
-		workerData: { workspaceId: id, folders, dataDir, logsDir: path.join(dataDir, 'logs'), home, appRoot, version, extensionDirs, lspSocket },
-	});
-	const handle: WorkspaceHandle = { id, worker, lspSocket, statsWaiters: [] };
-	workspaces.set(id, handle);
-	worker.on('message', (msg: { type: string; message?: string; heapUsed?: number }) => {
-		if (msg.type === 'ready') { resolve({ workspaceId: id, lspSocket }); }
-		else if (msg.type === 'log') { console.error(msg.message); }
-		else if (msg.type === 'stats') { handle.statsWaiters.splice(0).forEach((w) => w(msg.heapUsed ?? 0)); }
-	});
-	worker.on('error', (err) => { console.error(`[host] worker ${id} error:`, err); reject(err); });
-	worker.on('exit', () => workspaces.delete(id));
-	return promise;
+	workspaces.set(id, { id, lspSocket, folders });
+	const { promise, resolve } = Promise.withResolvers<void>();
+	readyWaiters.set(id, resolve);
+	worker!.postMessage({ type: 'openWorkspace', id, folders, lspSocket });
+	await promise;
+	return { workspaceId: id, lspSocket };
 }
 
 async function closeWorkspace(workspaceId: string): Promise<void> {
 	const handle = workspaces.get(workspaceId);
 	if (!handle) { return; }
-	handle.worker.postMessage({ type: 'close' });
+	worker?.postMessage({ type: 'closeWorkspace', id: workspaceId });
+	workspaces.delete(workspaceId);
 	try { fs.unlinkSync(handle.lspSocket); } catch { /* already gone */ }
 }
 
-function workerHeap(handle: WorkspaceHandle): Promise<number> {
-	const { promise, resolve } = Promise.withResolvers<number>();
-	handle.statsWaiters.push(resolve);
-	handle.worker.postMessage({ type: 'stats' });
-	return promise;
-}
-
 async function stats(): Promise<{ workers: { workspaceId: string; heapUsed: number }[]; rss: number }> {
-	const workers = await Promise.all([...workspaces.values()].map(async (h) => ({ workspaceId: h.id, heapUsed: await workerHeap(h) })));
+	let heapUsed = 0;
+	if (worker) {
+		const { promise, resolve } = Promise.withResolvers<number>();
+		statsWaiters.push(resolve);
+		worker.postMessage({ type: 'stats' });
+		heapUsed = await promise;
+	}
+	// One shared isolate: every window reports the same (shared) V8 heap. `rss` is the
+	// whole host process (the isolate runs as a thread inside it).
+	const workers = [...workspaces.keys()].map((workspaceId) => ({ workspaceId, heapUsed }));
 	return { workers, rss: process.memoryUsage().rss };
 }
 
@@ -141,5 +160,5 @@ try { fs.unlinkSync(controlSocket); } catch { /* fresh */ }
 const server = net.createServer(handleConnection);
 server.listen(controlSocket, () => console.error(`[host] control socket listening at ${controlSocket}`));
 
-process.on('SIGTERM', () => { server.close(); process.exit(0); });
-process.on('SIGINT', () => { server.close(); process.exit(0); });
+process.on('SIGTERM', () => { worker?.postMessage({ type: 'close' }); server.close(); process.exit(0); });
+process.on('SIGINT', () => { worker?.postMessage({ type: 'close' }); server.close(); process.exit(0); });

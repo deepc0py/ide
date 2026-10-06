@@ -55,7 +55,7 @@ class DiagnosticsSink {
 		const owners = this.byUri.get(uri);
 		const diagnostics: unknown[] = [];
 		if (owners) { for (const list of owners.values()) { diagnostics.push(...list); } }
-		this.session.notify('textDocument/publishDiagnostics', { uri, diagnostics });
+		this.session.notifyUri(uri, 'textDocument/publishDiagnostics', { uri, diagnostics });
 	}
 }
 
@@ -149,11 +149,11 @@ export function installMainShim(session: Session, deps: ShimDeps): MainShim {
 		MainThreadCommands: {
 			$registerCommand(id: string) {
 				session.commands.add(id);
-				session.notify('ide/commands/changed', { commands: [...session.commands].map((c) => ({ id: c, title: c, category: '' })) });
+				session.broadcast('ide/commands/changed', { commands: [...session.commands].map((c) => ({ id: c, title: c, category: '' })) });
 			},
 			$unregisterCommand(id: string) {
 				session.commands.delete(id);
-				session.notify('ide/commands/changed', { commands: [...session.commands].map((c) => ({ id: c, title: c, category: '' })) });
+				session.broadcast('ide/commands/changed', { commands: [...session.commands].map((c) => ({ id: c, title: c, category: '' })) });
 			},
 			$fireCommandActivationEvent(id: string) { activateByEvent(`onCommand:${id}`); },
 			async $executeCommand(id: string, args: unknown[] | SerializableObjectWithBuffers<unknown[]>) {
@@ -256,9 +256,9 @@ export function installMainShim(session: Session, deps: ShimDeps): MainShim {
 		MainThreadLanguageFeatures: makeLanguageFeatures(session),
 		MainThreadLanguages: {
 			$setLanguageStatus(handle: number, status: { label?: string; detail?: string; command?: { title?: string } }) {
-				session.notify('ide/statusBar/set', { id: `lang.${handle}`, text: status.label ?? '', tooltip: status.detail ?? '', alignment: 'right', priority: 0 });
+				session.broadcast('ide/statusBar/set', { id: `lang.${handle}`, text: status.label ?? '', tooltip: status.detail ?? '', alignment: 'right', priority: 0 });
 			},
-			$removeLanguageStatus(handle: number) { session.notify('ide/statusBar/remove', { id: `lang.${handle}` }); },
+			$removeLanguageStatus(handle: number) { session.broadcast('ide/statusBar/remove', { id: `lang.${handle}` }); },
 			async $changeLanguage(uriComp: UriComponents, languageId: string) {
 				const doc = session.documents.get(URI.revive(uriComp).toString());
 				if (doc) { doc.languageId = languageId; }
@@ -276,13 +276,13 @@ export function installMainShim(session: Session, deps: ShimDeps): MainShim {
 					}
 					return undefined;
 				}
-				session.notify('window/showMessage', { type, message });
+				session.broadcast('window/showMessage', { type, message });
 				return undefined;
 			},
 		},
 		MainThreadStatusBar: {
 			$setEntry(id: string, _statusId: string, _extId: string | undefined, _name: string, text: string, tooltip: unknown, _hasTip: boolean, command: { id?: string } | undefined, _color: unknown, _bg: unknown, alignLeft: boolean, priority: number | undefined) {
-				session.notify('ide/statusBar/set', {
+				session.broadcast('ide/statusBar/set', {
 					id, text,
 					tooltip: toPlainText(tooltip),
 					command: command?.id,
@@ -290,7 +290,7 @@ export function installMainShim(session: Session, deps: ShimDeps): MainShim {
 					priority: priority ?? 0,
 				});
 			},
-			$disposeEntry(id: string) { session.notify('ide/statusBar/remove', { id }); },
+			$disposeEntry(id: string) { session.broadcast('ide/statusBar/remove', { id }); },
 		},
 		MainThreadOutputService: {
 			async $register(label: string) { return `output-${label}`; },
@@ -383,7 +383,11 @@ export function installMainShim(session: Session, deps: ShimDeps): MainShim {
 		MainThreadBulkEdits: {
 			async $tryApplyWorkspaceEdit(dto: SerializableObjectWithBuffers<IWorkspaceEditDto> | IWorkspaceEditDto) {
 				const edit = dto instanceof SerializableObjectWithBuffers ? dto.value : dto;
-				const applied = await session.request('workspace/applyEdit', { edit: workspaceEditToLsp(edit) });
+				const lspEdit = workspaceEditToLsp(edit) as { changes?: Record<string, unknown> };
+				const firstUri = Object.keys(lspEdit.changes ?? {})[0];
+				const applied = await (firstUri
+					? session.requestForUri(firstUri, 'workspace/applyEdit', { edit: lspEdit })
+					: session.request('workspace/applyEdit', { edit: lspEdit }));
 				if (applied && typeof applied === 'object' && 'applied' in applied) { return Boolean(applied.applied); }
 				return true;
 			},
@@ -394,36 +398,36 @@ export function installMainShim(session: Session, deps: ShimDeps): MainShim {
 				webviewHtml.set(handle, value);
 				if (webviewCreated.has(handle)) {
 					// Panel already announced via $createWebviewPanel.
-					session.notify('ide/webview/setHtml', { handle, html: value });
+					session.broadcast('ide/webview/setHtml', { handle, html: value });
 				} else if (firstSet) {
 					// Webview *view* (e.g. Claude sidebar): announce it on first html.
 					webviewCreated.add(handle);
-					session.notify('ide/webview/create', { handle, viewType: handle, title: '', html: value, options: {}, kind: 'view' });
+					session.broadcast('ide/webview/create', { handle, viewType: handle, title: '', html: value, options: {}, kind: 'view' });
 				} else {
-					session.notify('ide/webview/setHtml', { handle, html: value });
+					session.broadcast('ide/webview/setHtml', { handle, html: value });
 				}
 			},
 			$setOptions() { /* options tracked client-side */ },
 			async $postMessage(handle: string, value: string) {
-				session.notify('ide/webview/postMessage', { handle, message: safeParse(value) });
+				session.broadcast('ide/webview/postMessage', { handle, message: safeParse(value) });
 				return true;
 			},
 		},
 		MainThreadWebviewPanels: {
 			$createWebviewPanel(_ext: unknown, handle: string, viewType: string, initData: { title?: string }, _show: unknown) {
 				webviewCreated.add(handle);
-				session.notify('ide/webview/create', { handle, viewType, title: initData.title ?? viewType, html: webviewHtml.get(handle) ?? '', options: {}, kind: 'panel' });
+				session.broadcast('ide/webview/create', { handle, viewType, title: initData.title ?? viewType, html: webviewHtml.get(handle) ?? '', options: {}, kind: 'panel' });
 			},
-			$disposeWebview(handle: string) { session.notify('ide/webview/dispose', { handle }); webviewCreated.delete(handle); },
+			$disposeWebview(handle: string) { session.broadcast('ide/webview/dispose', { handle }); webviewCreated.delete(handle); },
 			$reveal() { /* noop */ },
-			$setTitle(handle: string, value: string) { session.notify('ide/webview/setTitle', { handle, title: value }); },
+			$setTitle(handle: string, value: string) { session.broadcast('ide/webview/setTitle', { handle, title: value }); },
 			$setIconPath() { /* noop */ },
 			$registerSerializer() { /* noop */ },
 			$unregisterSerializer() { /* noop */ },
 		},
 		MainThreadWebviewViews: {
 			$registerWebviewViewProvider(_ext: unknown, viewType: string) {
-				session.notify('ide/views/register', { id: viewType, name: viewType, container: '', kind: 'webview' });
+				session.broadcast('ide/views/register', { id: viewType, name: viewType, container: '', kind: 'webview' });
 			},
 			$unregisterWebviewViewProvider() { /* noop */ },
 			$setWebviewViewTitle() { /* noop */ },
@@ -433,7 +437,7 @@ export function installMainShim(session: Session, deps: ShimDeps): MainShim {
 		},
 		MainThreadTreeViews: {
 			async $registerTreeViewDataProvider(treeViewId: string) {
-				session.notify('ide/views/register', { id: treeViewId, name: treeViewId, container: '', kind: 'tree' });
+				session.broadcast('ide/views/register', { id: treeViewId, name: treeViewId, container: '', kind: 'tree' });
 			},
 			async $refresh() { /* noop */ },
 			async $reveal() { /* noop */ },
@@ -460,7 +464,7 @@ export function installMainShim(session: Session, deps: ShimDeps): MainShim {
 						: undefined,
 					hoverMessage: hoverText(r.hoverMessage),
 				}));
-				session.notify('ide/decorations/set', { uri: doc, decorations });
+				session.notifyUri(doc, 'ide/decorations/set', { uri: doc, decorations });
 			},
 			async $trySetDecorationsFast() { /* no content payload */ },
 			async $tryRevealRange() { /* noop */ },

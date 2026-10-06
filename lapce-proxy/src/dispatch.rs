@@ -65,6 +65,10 @@ pub struct Dispatcher {
     file_watcher: FileWatcher,
     window_id: usize,
     tab_id: usize,
+    /// Workspace id handed out by the shared extension host, kept so the window
+    /// can close it on shutdown. `None` until the host opens the workspace.
+    #[cfg(unix)]
+    exthost_workspace_id: Arc<Mutex<Option<String>>>,
 }
 
 impl ProxyHandler for Dispatcher {
@@ -104,6 +108,28 @@ impl ProxyHandler for Dispatcher {
                     );
                     plugin_rpc.mainloop(&mut plugin);
                 });
+
+                // Hand this window's workspace folder to the shared extension
+                // host (one host per IDE process) and attach the per-workspace
+                // LSP bridge it returns. Runs off-thread because starting the
+                // host blocks on node boot the first time.
+                #[cfg(unix)]
+                if let Some(ws) = self.workspace.clone() {
+                    let proxy_rpc = self.proxy_rpc.clone();
+                    let slot = self.exthost_workspace_id.clone();
+                    thread::spawn(move || {
+                        if let Some(res) = crate::exthost::open_workspace(vec![ws])
+                        {
+                            *slot.lock() = Some(res.workspace_id);
+                            proxy_rpc.attach_lsp_server(
+                                "exthost".to_string(),
+                                res.lsp_socket,
+                                Vec::new(),
+                                Vec::new(),
+                            );
+                        }
+                    });
+                }
                 self.core_rpc.notification(CoreNotification::ProxyStatus {
                     status: lapce_rpc::proxy::ProxyStatus::Connected,
                 });
@@ -162,6 +188,13 @@ impl ProxyHandler for Dispatcher {
                 self.catalog_rpc.signature_help(request_id, &path, position);
             }
             Shutdown {} => {
+                #[cfg(unix)]
+                {
+                    let id = self.exthost_workspace_id.lock().take();
+                    if let Some(id) = id {
+                        crate::exthost::close_workspace(&id);
+                    }
+                }
                 self.catalog_rpc.shutdown();
                 for (_, sender) in self.terminals.iter() {
                     sender.send(Msg::Shutdown);
@@ -417,6 +450,9 @@ impl ProxyHandler for Dispatcher {
                     install: None,
                     options: None,
                 });
+            }
+            ExtHostNotification { method, params } => {
+                self.catalog_rpc.exthost_notification(method, params);
             }
         }
     }
@@ -1257,6 +1293,19 @@ impl ProxyHandler for Dispatcher {
                     },
                 );
             }
+            ExtHostRequest { method, params } => {
+                let proxy_rpc = self.proxy_rpc.clone();
+                self.catalog_rpc.exthost_request(
+                    method,
+                    params,
+                    move |_, result| {
+                        let result = result.map(|result| {
+                            ProxyResponse::ExtHostResponse { result }
+                        });
+                        proxy_rpc.handle_response(id, result);
+                    },
+                );
+            }
         }
     }
 }
@@ -1278,6 +1327,8 @@ impl Dispatcher {
             file_watcher,
             window_id: 1,
             tab_id: 1,
+            #[cfg(unix)]
+            exthost_workspace_id: Arc::new(Mutex::new(None)),
         }
     }
 

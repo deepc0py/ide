@@ -110,6 +110,18 @@ pub enum PluginCatalogRpc {
         path: Option<PathBuf>,
         check: bool,
     },
+    /// Route a raw request to the attached shared-extension-host LSP server
+    /// (looked up by its synthetic volt name).
+    ExtHostRequest {
+        method: Cow<'static, str>,
+        params: Value,
+        f: Box<dyn CloneableCallback<Value, RpcError>>,
+    },
+    /// Route a raw notification to the attached shared-extension-host LSP server.
+    ExtHostNotification {
+        method: Cow<'static, str>,
+        params: Value,
+    },
     FormatSemanticTokens {
         plugin_id: PluginId,
         tokens: SemanticTokens,
@@ -297,6 +309,16 @@ impl PluginCatalogRpcHandler {
                         check,
                     );
                 }
+                PluginCatalogRpc::ExtHostRequest {
+                    method,
+                    params,
+                    f,
+                } => {
+                    plugin.handle_exthost_request(method, params, f);
+                }
+                PluginCatalogRpc::ExtHostNotification { method, params } => {
+                    plugin.handle_exthost_notification(method, params);
+                }
                 PluginCatalogRpc::Handler(notification) => {
                     plugin.handle_notification(notification);
                 }
@@ -482,6 +504,40 @@ impl PluginCatalogRpcHandler {
             language_id,
             path,
             check,
+        };
+        if let Err(err) = self.plugin_tx.send(rpc) {
+            tracing::error!("{:?}", err);
+        }
+    }
+
+    /// Send a raw request to the attached shared-extension-host LSP server
+    /// (e.g. `workspace/executeCommand`, `ide/webview/resolveView`).
+    pub fn exthost_request(
+        &self,
+        method: impl Into<Cow<'static, str>>,
+        params: Value,
+        f: impl FnOnce(PluginId, Result<Value, RpcError>) + Send + DynClone + 'static,
+    ) {
+        let rpc = PluginCatalogRpc::ExtHostRequest {
+            method: method.into(),
+            params,
+            f: Box::new(f),
+        };
+        if let Err(err) = self.plugin_tx.send(rpc) {
+            tracing::error!("{:?}", err);
+        }
+    }
+
+    /// Send a raw notification to the attached shared-extension-host LSP server
+    /// (e.g. `ide/webview/onMessage`).
+    pub fn exthost_notification(
+        &self,
+        method: impl Into<Cow<'static, str>>,
+        params: Value,
+    ) {
+        let rpc = PluginCatalogRpc::ExtHostNotification {
+            method: method.into(),
+            params,
         };
         if let Err(err) = self.plugin_tx.send(rpc) {
             tracing::error!("{:?}", err);

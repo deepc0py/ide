@@ -219,6 +219,10 @@ pub struct Doc {
     semantic_styles: RwSignal<Option<Spans<Style>>>,
     /// Inlay hints for the document
     pub inlay_hints: RwSignal<Option<Spans<InlayHint>>>,
+    /// Inline "after" decorations from the shared extension host
+    /// (e.g. GitLens current-line blame), keyed per document.
+    pub ext_decorations:
+        RwSignal<im::Vector<lapce_rpc::ide_ext::Decoration>>,
     /// Current completion lens text, if any.
     /// This will be displayed even on views that are not focused.
     pub completion_lens: RwSignal<Option<String>>,
@@ -287,6 +291,7 @@ impl Doc {
             ))),
             semantic_styles: cx.create_rw_signal(None),
             inlay_hints: cx.create_rw_signal(None),
+            ext_decorations: cx.create_rw_signal(im::Vector::new()),
             diagnostics,
             completion_lens: cx.create_rw_signal(None),
             completion_pos: cx.create_rw_signal((0, 0)),
@@ -340,6 +345,7 @@ impl Doc {
             ))),
             semantic_styles: cx.create_rw_signal(None),
             inlay_hints: cx.create_rw_signal(None),
+            ext_decorations: cx.create_rw_signal(im::Vector::new()),
             diagnostics: DiagnosticData {
                 expanded: cx.create_rw_signal(true),
                 diagnostics: cx.create_rw_signal(im::Vector::new()),
@@ -394,6 +400,7 @@ impl Doc {
             ))),
             semantic_styles: cx.create_rw_signal(None),
             inlay_hints: cx.create_rw_signal(None),
+            ext_decorations: cx.create_rw_signal(im::Vector::new()),
             diagnostics: DiagnosticData {
                 expanded: cx.create_rw_signal(true),
                 diagnostics: cx.create_rw_signal(im::Vector::new()),
@@ -1929,6 +1936,33 @@ impl DocumentPhantom for Doc {
             });
 
         text.append(&mut diag_text);
+
+        // Inline "after" decorations from the shared extension host (e.g.
+        // GitLens current-line blame): render dimmed at the end of the line
+        // the decoration's range ends on.
+        let mut ext_deco_text: SmallVec<[PhantomText; 6]> = self
+            .ext_decorations
+            .get_untracked()
+            .iter()
+            .filter(|d| d.range.end.line as usize == line)
+            .filter_map(|d| {
+                let after = d.after.as_ref()?;
+                if after.content_text.is_empty() {
+                    return None;
+                }
+                Some(PhantomText {
+                    kind: PhantomTextKind::Diagnostic,
+                    col: end_offset - start_offset,
+                    affinity: Some(CursorAffinity::Backward),
+                    text: format!("    {}", after.content_text),
+                    fg: Some(config.color(LapceColor::INLAY_HINT_FOREGROUND)),
+                    font_size: Some(config.editor.inlay_hint_font_size()),
+                    bg: None,
+                    under_line: None,
+                })
+            })
+            .collect();
+        text.append(&mut ext_deco_text);
 
         let (completion_line, completion_col) = self.completion_pos.get_untracked();
         let completion_text = config

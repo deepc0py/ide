@@ -11,6 +11,10 @@ default-run  = "ide"
 lapce-app   = { path = "./lapce-app" }
 lapce-proxy = { path = "./lapce-proxy" }
 
+# On macOS the `ide` binary hosts native VS Code extension webviews by default.
+[target.'cfg(target_os = "macos")'.dependencies]
+lapce-app = { path = "./lapce-app", features = ["webview"] }
+
 [[bin]]
 name = "ide"
 path = "lapce-app/src/bin/lapce.rs"

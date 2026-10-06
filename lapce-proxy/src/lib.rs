@@ -3,6 +3,8 @@
 pub mod buffer;
 pub mod cli;
 pub mod dispatch;
+#[cfg(unix)]
+pub mod exthost;
 pub mod plugin;
 pub mod terminal;
 pub mod watcher;

@@ -2190,6 +2190,18 @@ fn tooltip_tip<V: View + 'static>(
     })
 }
 
+/// The native extension-webview dock (Claude Code sidebar etc.). macOS-only and
+/// gated by the `webview` feature; a no-op placeholder elsewhere.
+#[cfg(all(feature = "webview", target_os = "macos"))]
+fn ext_webview_dock(window_tab_data: Rc<WindowTabData>) -> impl View {
+    crate::webview_view::ext_webview_panel(window_tab_data)
+}
+
+#[cfg(not(all(feature = "webview", target_os = "macos")))]
+fn ext_webview_dock(_window_tab_data: Rc<WindowTabData>) -> impl View {
+    floem::views::empty()
+}
+
 fn workbench(window_tab_data: Rc<WindowTabData>) -> impl View {
     let workbench_size = window_tab_data.common.workbench_size;
     let main_split_width = window_tab_data.main_split.width;
@@ -2213,6 +2225,7 @@ fn workbench(window_tab_data: Rc<WindowTabData>) -> impl View {
             .style(|s| s.flex_col().flex_grow(1.0f32))
         },
         panel_container_view(window_tab_data.clone(), PanelContainerPosition::Right),
+        ext_webview_dock(window_tab_data.clone()),
         window_message_view(window_tab_data.messages, window_tab_data.common.config),
     ))
     .on_resize(move |rect| {
@@ -4103,6 +4116,10 @@ pub fn launch() {
             if let Err(err) = db.insert_app(app_data.clone()) {
                 tracing::error!("{:?}", err);
             }
+            // Tear down the shared VS Code extension host so no node process
+            // (and its language-server children) is left orphaned.
+            #[cfg(unix)]
+            lapce_proxy::exthost::shutdown();
         }
         floem::AppEvent::Reopen {
             has_visible_windows,

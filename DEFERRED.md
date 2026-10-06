@@ -47,20 +47,34 @@ badges). These are observable in the worker log and are safe no-ops.
 
 ## Feature caveats
 
-- **rust-lang.rust-analyzer — go-to-definition**: rust-analyzer *activates*
-  (`workspaceContains:Cargo.toml`), launches its bundled `server/rust-analyzer`
-  (darwin-arm64) binary, and the language client registers `definition` and `hover`
-  providers from the server's advertised capabilities (proving the full
-  LSP ⇄ ExtHost ⇄ language-client ⇄ server round-trip works). In the headless
-  harness, however, `textDocument/definition` has been returning empty while
-  `textDocument/hover` returns content, i.e. the server starts but its
-  project-load/`serverStatus` readiness for precise navigation is not reliably
-  reached within the test window (no editor UI drives the usual
-  `rust-analyzer/reloadWorkspace` / progress acknowledgements). The test therefore
-  asserts rust-analyzer provides a definition **or** hover. Closing this fully needs
-  bridging rust-analyzer's custom `experimental/serverStatus` + work-done progress
-  handshake end-to-end. Not an Electron blocker; a language-client-readiness gap.
+- **rust-lang.rust-analyzer — go-to-definition (RESOLVED)**: cross-file/cross-module
+  go-to-definition now works end-to-end and the test asserts the exact target
+  location (`src/math.rs`, line 0) for a `math::add` call site. Two real causes were
+  found and fixed:
+  1. **Toolchain unreachable in the test env.** The harness sets `HOME=/tmp/...`
+     (per the sandbox rules), but `cargo`/`rustc` are rustup *shims* that locate the
+     toolchain via `$RUSTUP_HOME` (default `$HOME/.rustup`). With an empty `/tmp`
+     HOME, `cargo metadata` fails, so rust-analyzer never builds its crate graph and
+     *both* definition and hover return empty. Fix: the test (and
+     `scripts/measure.mjs`) pass the real `RUSTUP_HOME` (read-only) plus a `/tmp`
+     `CARGO_HOME`, keeping HOME in `/tmp`. The production IDE runs with the user's
+     real HOME, where this already works.
+  2. **A bogus hover masked the failure.** `lsp.ts`'s `filterMatches` ignored a
+     DocumentFilter's `pattern`, so Python's pattern-only hover provider
+     (`**/*requirement*.txt`) matched *every* language and returned a spurious
+     `pypi.org/project/<word>` hover on Rust files — the old "definition **or**
+     hover" test passed on that. `filterMatches` now honours `pattern`
+     (glob/RelativePattern), so providers only match the documents they declare.
 
 - **ms-python.python — language features**: works via Jedi
   (`"python.languageServer": "Jedi"`); hover on a symbol returns the signature. No
   Pylance (proprietary) is used.
+
+- **OutputChannel text / `ide/output/append`**: not emitted. In this VS Code build
+  `OutputChannel.append()` routes text through a file logger (spdlog), which the
+  build stubs out (native, dropped). The main thread only receives
+  `MainThreadOutputService.$register(label, file, langId, extId)` and
+  `$update(channelId, Append)` — neither carries the text (the real workbench reads
+  it back from the log file). Surfacing `ide/output/append{channel,text}` would need
+  replacing the stubbed logger with a capturing `ILogger` that forwards each
+  `append()`; deferred. Clients should render extension `LogMessage`s meanwhile.

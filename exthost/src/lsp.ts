@@ -3,7 +3,7 @@
 // providers (via the ExtHost* proxies) and surfaces the custom `ide/*` protocol.
 import type { Socket } from 'node:net';
 import { CancellationToken, ExtHostContext, URI } from './vs.js';
-import type { Session, FeatureRegistration } from './session.js';
+import type { Session, Workspace, FeatureRegistration } from './session.js';
 import type { IDocumentFilterDto } from '../.vscode-src/src/vs/workbench/api/common/extHost.protocol.js';
 import type { UriComponents } from './vs.js';
 import {
@@ -11,6 +11,7 @@ import {
 	textEditsToLsp, suggestItemToLsp, workspaceEditToLsp, documentSymbolToLsp,
 } from './convert.js';
 import { ISuggestResultDtoField } from './vs.js';
+import { globToRegExp } from './glob.js';
 
 interface JsonRpcMessage {
 	jsonrpc?: string;
@@ -23,17 +24,42 @@ interface JsonRpcMessage {
 
 const COMPLETION_TRIGGER_CHARS = ['.', ':', '>', '"', "'", '/', '@', '<', ' ', '(', ',', '='];
 
-function filterMatches(filter: IDocumentFilterDto | string, languageId: string): boolean {
+// Match a DocumentFilter.pattern (glob string or RelativePattern) against a path.
+function patternMatches(pattern: NonNullable<IDocumentFilterDto['pattern']>, fsPath: string): boolean {
+	let glob: string;
+	let base: string | undefined;
+	if (typeof pattern === 'string') {
+		glob = pattern;
+	} else {
+		glob = pattern.pattern;
+		const dto = pattern as { base?: string; baseUri?: UriComponents };
+		base = dto.baseUri ? URI.revive(dto.baseUri).fsPath : dto.base;
+	}
+	let target = fsPath;
+	if (base) {
+		const prefix = base.endsWith('/') ? base : `${base}/`;
+		if (fsPath !== base && !fsPath.startsWith(prefix)) { return false; }
+		target = fsPath.slice(base.length).replace(/^[/\\]+/, '');
+	}
+	if (globToRegExp(glob).test(target)) { return true; }
+	return !glob.startsWith('/') && globToRegExp(`**/${glob}`).test(target);
+}
+
+// A provider's selector matches a document only if language/scheme AND any
+// `pattern` constraint match. Ignoring `pattern` (as before) made pattern-only
+// providers (e.g. Python's `**/*requirement*.txt` hover) match every language.
+function filterMatches(filter: IDocumentFilterDto | string, languageId: string, fsPath: string): boolean {
 	if (typeof filter === 'string') { return filter === languageId || filter === '*'; }
 	if (filter.language && filter.language !== languageId && filter.language !== '*') { return false; }
 	if (filter.scheme && filter.scheme !== 'file' && filter.scheme !== '*') { return false; }
+	if (filter.pattern && !patternMatches(filter.pattern, fsPath)) { return false; }
 	return true;
 }
 
-function matchingHandles(session: Session, kind: string, languageId: string): FeatureRegistration[] {
+function matchingHandles(session: Session, kind: string, languageId: string, fsPath: string): FeatureRegistration[] {
 	const out: FeatureRegistration[] = [];
 	for (const reg of session.features.values()) {
-		if (reg.kind === kind && reg.selector.some((f) => filterMatches(f, languageId))) { out.push(reg); }
+		if (reg.kind === kind && reg.selector.some((f) => filterMatches(f, languageId, fsPath))) { out.push(reg); }
 	}
 	return out;
 }
@@ -42,7 +68,7 @@ export class LspConnection {
 	private buffer = Buffer.alloc(0);
 	private readonly langFeatures = this.session.proxy(ExtHostContext.ExtHostLanguageFeatures);
 
-	constructor(private readonly session: Session, private readonly socket: Socket) {
+	constructor(private readonly session: Session, private readonly workspace: Workspace, private readonly socket: Socket) {
 		socket.on('data', (chunk) => this.onData(chunk));
 		socket.on('error', (err) => this.session.log(`lsp socket error: ${String(err)}`));
 	}
@@ -128,7 +154,7 @@ export class LspConnection {
 	private async onRequest(id: number | string, method: string, params: unknown): Promise<unknown> {
 		switch (method) {
 			case 'initialize': {
-				this.session.attachClient((m, p) => this.notify(m, p), (m, p) => this.request(m, p));
+				this.workspace.attachClient((m, p) => this.notify(m, p), (m, p) => this.request(m, p));
 				return { capabilities: this.capabilities(), serverInfo: { name: 'ide-exthost', version: '0.1.0' } };
 			}
 			case 'shutdown': return null;
@@ -231,12 +257,14 @@ export class LspConnection {
 
 	// ---- language feature requests ------------------------------------------
 
-	private docParams(params: unknown): { uriComp: UriComponents; languageId: string; position: unknown } | undefined {
+	private docParams(params: unknown): { uriComp: UriComponents; fsPath: string; languageId: string; position: unknown } | undefined {
 		const p = params as { textDocument: { uri: string }; position?: { line: number; character: number } };
 		const doc = this.session.documents.get(p.textDocument.uri);
 		if (!doc) { return undefined; }
+		const uriComp = URI.parse(p.textDocument.uri);
 		return {
-			uriComp: URI.parse(p.textDocument.uri),
+			uriComp,
+			fsPath: uriComp.fsPath,
 			languageId: doc.languageId,
 			position: p.position ? toInternalPosition(p.position) : undefined,
 		};
@@ -245,7 +273,7 @@ export class LspConnection {
 	private async hover(params: unknown): Promise<unknown> {
 		const ctx = this.docParams(params);
 		if (!ctx) { return null; }
-		for (const reg of matchingHandles(this.session, 'hover', ctx.languageId)) {
+		for (const reg of matchingHandles(this.session, 'hover', ctx.languageId, ctx.fsPath)) {
 			const result = await this.langFeatures.$provideHover(reg.handle, ctx.uriComp, ctx.position as never, undefined, CancellationToken.None);
 			if (result) { return hoverToLsp(result); }
 		}
@@ -258,7 +286,7 @@ export class LspConnection {
 		const method = kind === 'definition' ? '$provideDefinition'
 			: kind === 'declaration' ? '$provideDeclaration'
 				: kind === 'typeDefinition' ? '$provideTypeDefinition' : '$provideImplementation';
-		const handles = matchingHandles(this.session, kind, ctx.languageId);
+		const handles = matchingHandles(this.session, kind, ctx.languageId, ctx.fsPath);
 		if (process.env.IDE_EXTHOST_DEBUG) { this.session.log(`definition(${kind}) lang=${ctx.languageId} handles=${handles.length}`); }
 		const out: unknown[] = [];
 		for (const reg of handles) {
@@ -274,7 +302,7 @@ export class LspConnection {
 		if (!ctx) { return null; }
 		const context = (params as { context?: { includeDeclaration?: boolean } }).context ?? { includeDeclaration: true };
 		const out: unknown[] = [];
-		for (const reg of matchingHandles(this.session, 'references', ctx.languageId)) {
+		for (const reg of matchingHandles(this.session, 'references', ctx.languageId, ctx.fsPath)) {
 			const locs = await this.langFeatures.$provideReferences(reg.handle, ctx.uriComp, ctx.position as never, context as never, CancellationToken.None);
 			out.push(...locationsToLsp(locs));
 		}
@@ -284,7 +312,7 @@ export class LspConnection {
 	private async documentSymbol(params: unknown): Promise<unknown> {
 		const ctx = this.docParams(params);
 		if (!ctx) { return null; }
-		for (const reg of matchingHandles(this.session, 'documentSymbol', ctx.languageId)) {
+		for (const reg of matchingHandles(this.session, 'documentSymbol', ctx.languageId, ctx.fsPath)) {
 			const symbols = await this.langFeatures.$provideDocumentSymbols(reg.handle, ctx.uriComp, CancellationToken.None);
 			if (symbols && symbols.length > 0) { return symbols.map(documentSymbolToLsp); }
 		}
@@ -296,7 +324,7 @@ export class LspConnection {
 		if (!ctx) { return { isIncomplete: false, items: [] }; }
 		const context = (params as { context?: { triggerKind?: number; triggerCharacter?: string } }).context ?? { triggerKind: 0 };
 		const items: unknown[] = [];
-		for (const reg of matchingHandles(this.session, 'completion', ctx.languageId)) {
+		for (const reg of matchingHandles(this.session, 'completion', ctx.languageId, ctx.fsPath)) {
 			const result = await this.langFeatures.$provideCompletionItems(reg.handle, ctx.uriComp, ctx.position as never, context as never, CancellationToken.None);
 			if (!result) { continue; }
 			const defaults = result[ISuggestResultDtoField.defaultRanges];
@@ -312,7 +340,7 @@ export class LspConnection {
 		if (!ctx) { return null; }
 		const options = (params as { options?: { tabSize?: number; insertSpaces?: boolean } }).options ?? {};
 		const fmt = { tabSize: options.tabSize ?? 4, insertSpaces: options.insertSpaces ?? true };
-		for (const reg of matchingHandles(this.session, 'formatting', ctx.languageId)) {
+		for (const reg of matchingHandles(this.session, 'formatting', ctx.languageId, ctx.fsPath)) {
 			const edits = await this.langFeatures.$provideDocumentFormattingEdits(reg.handle, ctx.uriComp, fmt as never, CancellationToken.None);
 			if (edits) { return textEditsToLsp(edits); }
 		}
@@ -325,7 +353,7 @@ export class LspConnection {
 		const p = params as { range: { start: { line: number; character: number }; end: { line: number; character: number } }; options?: { tabSize?: number; insertSpaces?: boolean } };
 		const range = toInternalRange(p.range);
 		const fmt = { tabSize: p.options?.tabSize ?? 4, insertSpaces: p.options?.insertSpaces ?? true };
-		for (const reg of matchingHandles(this.session, 'rangeFormatting', ctx.languageId)) {
+		for (const reg of matchingHandles(this.session, 'rangeFormatting', ctx.languageId, ctx.fsPath)) {
 			const edits = await this.langFeatures.$provideDocumentRangeFormattingEdits(reg.handle, ctx.uriComp, range as never, fmt as never, CancellationToken.None);
 			if (edits) { return textEditsToLsp(edits); }
 		}
@@ -336,7 +364,7 @@ export class LspConnection {
 		const ctx = this.docParams(params);
 		if (!ctx) { return null; }
 		const newName = (params as { newName: string }).newName;
-		for (const reg of matchingHandles(this.session, 'rename', ctx.languageId)) {
+		for (const reg of matchingHandles(this.session, 'rename', ctx.languageId, ctx.fsPath)) {
 			const edit = await this.langFeatures.$provideRenameEdits(reg.handle, ctx.uriComp, ctx.position as never, newName, CancellationToken.None);
 			if (edit) { return workspaceEditToLsp(edit); }
 		}
@@ -350,7 +378,7 @@ export class LspConnection {
 		const range = toInternalRange(p.range);
 		const context = { trigger: 1, only: p.context?.only?.[0], diagnostics: [] };
 		const actions: unknown[] = [];
-		for (const reg of matchingHandles(this.session, 'codeAction', ctx.languageId)) {
+		for (const reg of matchingHandles(this.session, 'codeAction', ctx.languageId, ctx.fsPath)) {
 			const list = await this.langFeatures.$provideCodeActions(reg.handle, ctx.uriComp, range as never, context as never, CancellationToken.None);
 			if (!list) { continue; }
 			for (const action of list.actions) {

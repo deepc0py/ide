@@ -81,6 +81,12 @@ impl LspServerConfig {
     /// Whether this server should handle a document with the given language id
     /// and path.
     pub fn matches(&self, language_id: &str, path: Option<&Path>) -> bool {
+        // Empty languages + extensions means "all documents" — used by the
+        // shared extension host's per-workspace bridge, which routes every file
+        // to the host for its extensions to triage.
+        if self.languages.is_empty() && self.extensions.is_empty() {
+            return true;
+        }
         if self.languages.iter().any(|l| l == language_id) {
             return true;
         }
@@ -96,6 +102,14 @@ impl LspServerConfig {
 
     /// Build the LSP document selector used to route requests to this server.
     pub fn document_selector(&self) -> DocumentSelector {
+        // Empty languages + extensions => match every document.
+        if self.languages.is_empty() && self.extensions.is_empty() {
+            return vec![lsp_types::DocumentFilter {
+                language: None,
+                scheme: None,
+                pattern: Some("**/*".to_string()),
+            }];
+        }
         let mut selectors = Vec::new();
         for lang in &self.languages {
             selectors.push(lsp_types::DocumentFilter {

@@ -95,9 +95,20 @@ name = "rustproj"
 path = "src/main.rs"
 `;
 
-// Line 0: fn add definition; line 1: fn main with the add(1,2) call site.
-const RUST_MAIN = `fn add(a:i32,b:i32)->i32{a+b}
-fn main(){ let r = add(1,2); println!("{}",r); }
+// Cross-file (cross-module) go-to-definition fixture. `add` is defined in
+// `src/math.rs`; `main.rs` calls `math::add`, so resolving the call site requires
+// rust-analyzer to have loaded the crate graph (not just syntax analysis).
+const RUST_MATH = `pub fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+`;
+// Line 3 "    let r = math::add(1, 2);" — the `add` token starts at char 18.
+const RUST_MAIN = `mod math;
+
+fn main() {
+    let r = math::add(1, 2);
+    println!("{}", r);
+}
 `;
 
 // ---- Python project -----------------------------------------------------------
@@ -136,6 +147,7 @@ export async function makeFixtures(root = '/tmp/ide-exthost-fixtures') {
   // Rust cargo project.
   const rustProj = path.join(root, 'rustproj');
   const rustCargoToml = await writeFile(path.join(rustProj, 'Cargo.toml'), RUST_CARGO);
+  const rustMath = await writeFile(path.join(rustProj, 'src', 'math.rs'), RUST_MATH);
   const rustMain = await writeFile(path.join(rustProj, 'src', 'main.rs'), RUST_MAIN);
 
   // Python project.
@@ -179,12 +191,14 @@ export async function makeFixtures(root = '/tmp/ide-exthost-fixtures') {
     // Rust
     rustProj,
     rustCargoToml,
+    rustMath,
+    rustMathUri: uri(rustMath),
     rustMain,
     rustMainUri: uri(rustMain),
-    // `add` call token on line 1 ("fn main(){ let r = add(1,2); ... }") starts at char 19.
-    rustCallSite: { uri: uri(rustMain), line: 1, character: 19 },
-    // `fn add` definition is on line 0 (token at char 3).
-    rustDefinition: { uri: uri(rustMain), line: 0, character: 3 },
+    // `add` call token on line 3 ("    let r = math::add(1, 2);") starts at char 18.
+    rustCallSite: { uri: uri(rustMain), line: 3, character: 18 },
+    // The definition lives in src/math.rs, on line 0 (the `pub fn add` identifier).
+    rustExpectedDefinitionUri: uri(rustMath),
     rustExpectedDefinitionLine: 0,
     // Python
     pyMain,

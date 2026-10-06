@@ -385,6 +385,9 @@ impl PaletteData {
             PaletteKind::Command => {
                 self.get_commands();
             }
+            PaletteKind::ExtensionCommand => {
+                self.get_extension_commands();
+            }
             PaletteKind::Workspace => {
                 self.get_workspaces();
             }
@@ -675,6 +678,49 @@ impl PaletteData {
         });
 
         self.items.set(items);
+    }
+
+    /// Initialize the palette with the extension-contributed commands, fetched
+    /// live from the shared extension host. The command id is carried in the
+    /// item content so `select` can execute it via the host.
+    fn get_extension_commands(&self) {
+        let set_items = self.items.write_only();
+        let send = create_ext_action(self.common.scope, move |result| {
+            let mut items: im::Vector<PaletteItem> = im::Vector::new();
+            if let Ok(ProxyResponse::ExtHostResponse { result }) = result {
+                if let Ok(list) = serde_json::from_value::<
+                    lapce_rpc::ide_ext::CommandsListResult,
+                >(result)
+                {
+                    for cmd in list.commands {
+                        let title = if cmd.title.is_empty() {
+                            cmd.id.clone()
+                        } else if let Some(category) = cmd.category.as_ref() {
+                            format!("{category}: {}", cmd.title)
+                        } else {
+                            cmd.title.clone()
+                        };
+                        items.push_back(PaletteItem {
+                            content: PaletteItemContent::SCMReference {
+                                name: cmd.id,
+                            },
+                            filter_text: title,
+                            score: 0,
+                            indices: Vec::new(),
+                        });
+                    }
+                }
+            }
+            set_items.set(items);
+        });
+
+        self.common.proxy.ext_host_request(
+            "ide/commands/list".to_string(),
+            serde_json::json!({}),
+            move |result| {
+                send(result);
+            },
+        );
     }
 
     /// Initialize the palette with all the available workspaces, local and remote.
@@ -1203,7 +1249,21 @@ impl PaletteData {
     fn select(&self) {
         let index = self.index.get_untracked();
         let items = self.filtered_items.get_untracked();
+        let kind = self.kind.get_untracked();
         self.close();
+        if kind == PaletteKind::ExtensionCommand {
+            if let Some(PaletteItemContent::SCMReference { name }) =
+                items.get(index).map(|item| &item.content)
+            {
+                let command = name.clone();
+                self.common.proxy.ext_host_request(
+                    "workspace/executeCommand".to_string(),
+                    serde_json::json!({ "command": command, "arguments": [] }),
+                    |_| {},
+                );
+            }
+            return;
+        }
         if let Some(item) = items.get(index) {
             match &item.content {
                 PaletteItemContent::PaletteHelp { cmd } => {

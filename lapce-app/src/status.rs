@@ -4,7 +4,7 @@ use std::{
 };
 
 use floem::{
-    View,
+    IntoView, View,
     event::EventPropagation,
     reactive::{
         Memo, ReadSignal, RwSignal, SignalGet, SignalUpdate, SignalWith, create_memo,
@@ -14,10 +14,12 @@ use floem::{
 };
 use indexmap::IndexMap;
 use lapce_core::mode::{Mode, VisualMode};
+use lapce_rpc::{ide_ext::StatusBarItem, proxy::ProxyRpcHandler};
 use lsp_types::{DiagnosticSeverity, ProgressToken};
+use serde_json::json;
 
 use crate::{
-    app::clickable_icon,
+    app::{clickable_icon, tooltip_label},
     command::LapceWorkbenchCommand,
     config::{LapceConfig, color::LapceColor, icon::LapceIcons},
     editor::EditorData,
@@ -71,6 +73,28 @@ pub fn status(
     };
 
     let progresses = window_tab_data.progresses;
+    let ide_ext = window_tab_data.ide_ext.clone();
+    let ext_proxy = window_tab_data.common.proxy.clone();
+    let left_ext_items = {
+        let ide_ext = ide_ext.clone();
+        let proxy = ext_proxy.clone();
+        dyn_stack(
+            move || ide_ext.status_items_split().0,
+            |item: &StatusBarItem| item.id.clone(),
+            move |item| ext_status_item(config, proxy.clone(), item),
+        )
+        .style(|s| s.height_pct(100.0).items_center())
+    };
+    let right_ext_items = {
+        let ide_ext = ide_ext.clone();
+        let proxy = ext_proxy.clone();
+        dyn_stack(
+            move || ide_ext.status_items_split().1,
+            |item: &StatusBarItem| item.id.clone(),
+            move |item| ext_status_item(config, proxy.clone(), item),
+        )
+        .style(|s| s.height_pct(100.0).items_center())
+    };
     let mode = create_memo(move |_| window_tab_data.mode());
     let pointer_down = floem::reactive::create_rw_signal(false);
 
@@ -226,6 +250,7 @@ pub fn status(
                 })
             },
             progress_view(config, progresses),
+            left_ext_items,
         ))
         .style(|s| {
             s.height_pct(100.0)
@@ -380,7 +405,7 @@ pub fn status(
             .on_click_stop(move |_| {
                 palette_clone.run(PaletteKind::Language);
             });
-            (cursor_info, line_ending_info, language_info)
+            (right_ext_items, cursor_info, line_ending_info, language_info)
         })
         .style(|s| {
             s.height_pct(100.0)
@@ -470,4 +495,72 @@ fn status_text<S: std::fmt::Display + 'static>(
             })
             .selectable(false)
     })
+}
+
+/// Strip VS Code `$(icon)` codicon markup from a status-bar label, leaving the
+/// surrounding plain text.
+fn strip_codicons(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '$' && chars.peek() == Some(&'(') {
+            chars.next();
+            for c in chars.by_ref() {
+                if c == ')' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out.trim().to_string()
+}
+
+/// Render a single extension-host status-bar item, matching the native
+/// status-bar styling and executing its command (if any) on click.
+fn ext_status_item(
+    config: ReadSignal<Arc<LapceConfig>>,
+    proxy: ProxyRpcHandler,
+    item: StatusBarItem,
+) -> impl View {
+    let text = strip_codicons(&item.text);
+    let command = item.command.clone();
+    let tooltip = item.tooltip.clone();
+    let clickable = command.is_some();
+    let content = label(move || text.clone()).style(move |s| {
+        let config = config.get();
+        let s = s
+            .height_full()
+            .padding_horiz(10.0)
+            .items_center()
+            .color(config.color(LapceColor::STATUS_FOREGROUND))
+            .selectable(false);
+        if clickable {
+            s.hover(|s| {
+                s.cursor(CursorStyle::Pointer).background(
+                    config.color(LapceColor::PANEL_HOVERED_BACKGROUND),
+                )
+            })
+        } else {
+            s
+        }
+    });
+    let content = if let Some(command) = command {
+        content.on_click_stop(move |_| {
+            proxy.ext_host_request(
+                "workspace/executeCommand".to_string(),
+                json!({ "command": command.clone(), "arguments": [] }),
+                |_| {},
+            );
+        })
+    } else {
+        content
+    };
+    match tooltip {
+        Some(tip) => {
+            tooltip_label(config, content, move || tip.clone()).into_any()
+        }
+        None => content.into_any(),
+    }
 }

@@ -184,6 +184,56 @@ impl PluginCatalog {
         }
     }
 
+    /// Name of the synthetic volt under which the shared extension host's
+    /// per-workspace LSP bridge is attached (see the `Dispatcher` init path).
+    const EXTHOST_SERVER_NAME: &'static str = "exthost";
+
+    fn exthost_plugin(&self) -> Option<(PluginId, &PluginServerRpcHandler)> {
+        self.plugins
+            .iter()
+            .find(|(_, p)| p.volt_id.name == Self::EXTHOST_SERVER_NAME)
+            .map(|(id, p)| (*id, p))
+    }
+
+    pub fn handle_exthost_request(
+        &mut self,
+        method: Cow<'static, str>,
+        params: Value,
+        f: Box<dyn CloneableCallback<Value, RpcError>>,
+    ) {
+        match self.exthost_plugin() {
+            Some((plugin_id, plugin)) => {
+                plugin.server_request_async(
+                    method,
+                    params,
+                    None,
+                    None,
+                    false,
+                    move |result| f(plugin_id, result),
+                );
+            }
+            None => {
+                f(
+                    PluginId(0),
+                    Err(RpcError {
+                        code: 0,
+                        message: "shared extension host not attached".to_string(),
+                    }),
+                );
+            }
+        }
+    }
+
+    pub fn handle_exthost_notification(
+        &mut self,
+        method: Cow<'static, str>,
+        params: Value,
+    ) {
+        if let Some((_, plugin)) = self.exthost_plugin() {
+            plugin.server_notification(method, params, None, None, false);
+        }
+    }
+
     pub fn shutdown_volt(
         &mut self,
         volt: VoltInfo,

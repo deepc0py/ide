@@ -195,6 +195,7 @@ pub struct WindowTabData {
     pub update_in_progress: RwSignal<bool>,
     pub progresses: RwSignal<IndexMap<ProgressToken, WorkProgress>>,
     pub messages: RwSignal<Vec<(String, ShowMessageParams)>>,
+    pub ide_ext: crate::ide_ext::IdeExtData,
     pub common: Rc<CommonData>,
 }
 
@@ -580,6 +581,7 @@ impl WindowTabData {
             update_in_progress: cx.create_rw_signal(false),
             progresses: cx.create_rw_signal(IndexMap::new()),
             messages: cx.create_rw_signal(Vec::new()),
+            ide_ext: crate::ide_ext::IdeExtData::new(cx),
             common,
         };
 
@@ -1152,6 +1154,9 @@ impl WindowTabData {
             PaletteWorkspaceSymbol => {}
             PaletteCommand => {
                 self.palette.run(PaletteKind::Command);
+            }
+            PaletteExtensionCommand => {
+                self.palette.run(PaletteKind::ExtensionCommand);
             }
             PaletteWorkspace => {
                 self.palette.run(PaletteKind::Workspace);
@@ -2366,6 +2371,52 @@ impl WindowTabData {
             }
             CoreNotification::WorkspaceFileChange => {
                 self.file_explorer.reload();
+            }
+            CoreNotification::IdeStatusBarSet { item } => {
+                self.ide_ext.set_status_item(item.clone());
+            }
+            CoreNotification::IdeStatusBarRemove { id } => {
+                self.ide_ext.remove_status_item(id);
+            }
+            CoreNotification::IdeCommandsChanged { commands } => {
+                self.ide_ext.set_commands(commands.clone());
+            }
+            CoreNotification::IdeOutputAppend { append } => {
+                self.ide_ext
+                    .append_output(append.channel.clone(), append.text.clone());
+            }
+            CoreNotification::IdeViewsRegister { views } => {
+                self.ide_ext.register_views(views.clone());
+            }
+            CoreNotification::IdeWebviewCreate { webview } => {
+                self.ide_ext.webview_create(webview.clone());
+            }
+            CoreNotification::IdeWebviewSetHtml { handle, html } => {
+                self.ide_ext.webview_set_html(handle, html.clone());
+            }
+            CoreNotification::IdeWebviewSetTitle { handle, title } => {
+                self.ide_ext.webview_set_title(handle, title.clone());
+            }
+            CoreNotification::IdeWebviewPostMessage { handle, message } => {
+                self.ide_ext
+                    .webview_post_message(handle.clone(), message.clone());
+            }
+            CoreNotification::IdeWebviewDispose { handle } => {
+                self.ide_ext.webview_dispose(handle);
+            }
+            CoreNotification::IdeDecorationsSet { uri, decorations } => {
+                let path = path_from_url(uri);
+                self.ide_ext
+                    .set_decorations(path.clone(), decorations.clone());
+                if let Some(doc) = self
+                    .main_split
+                    .docs
+                    .with_untracked(|docs| docs.get(&path).cloned())
+                {
+                    doc.ext_decorations
+                        .set(im::Vector::from(decorations.clone()));
+                    doc.clear_text_cache();
+                }
             }
             _ => {}
         }

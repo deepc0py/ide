@@ -21,6 +21,10 @@ use crate::{
         self, DapId, RunDebugConfig, Scope, StackFrame, Stopped, ThreadId, Variable,
     },
     file::PathObject,
+    ide_ext::{
+        Decoration, ExtCommand, ExtView, OutputAppendParams, StatusBarItem,
+        WebviewCreate,
+    },
     plugin::{PluginId, VoltInfo, VoltMetadata},
     proxy::ProxyStatus,
     source_control::DiffInfo,
@@ -145,6 +149,44 @@ pub enum CoreNotification {
         dap_id: DapId,
         path: PathBuf,
         breakpoints: Vec<dap_types::Breakpoint>,
+    },
+    // ---- shared extension host (`ide/*`) UI contributions ----
+    IdeStatusBarSet {
+        item: StatusBarItem,
+    },
+    IdeStatusBarRemove {
+        id: String,
+    },
+    IdeCommandsChanged {
+        commands: Vec<ExtCommand>,
+    },
+    IdeOutputAppend {
+        append: OutputAppendParams,
+    },
+    IdeViewsRegister {
+        views: Vec<ExtView>,
+    },
+    IdeWebviewCreate {
+        webview: WebviewCreate,
+    },
+    IdeWebviewSetHtml {
+        handle: String,
+        html: String,
+    },
+    IdeWebviewSetTitle {
+        handle: String,
+        title: String,
+    },
+    IdeWebviewPostMessage {
+        handle: String,
+        message: serde_json::Value,
+    },
+    IdeWebviewDispose {
+        handle: String,
+    },
+    IdeDecorationsSet {
+        uri: lsp_types::Url,
+        decorations: Vec<Decoration>,
     },
 }
 
@@ -401,6 +443,61 @@ impl CoreRpcHandler {
 
     pub fn home_dir(&self, path: PathBuf) {
         self.notification(CoreNotification::HomeDir { path });
+    }
+
+    pub fn ide_status_bar_set(&self, item: crate::ide_ext::StatusBarItem) {
+        self.notification(CoreNotification::IdeStatusBarSet { item });
+    }
+
+    pub fn ide_status_bar_remove(&self, id: String) {
+        self.notification(CoreNotification::IdeStatusBarRemove { id });
+    }
+
+    pub fn ide_commands_changed(&self, commands: Vec<crate::ide_ext::ExtCommand>) {
+        self.notification(CoreNotification::IdeCommandsChanged { commands });
+    }
+
+    pub fn ide_output_append(&self, append: crate::ide_ext::OutputAppendParams) {
+        self.notification(CoreNotification::IdeOutputAppend { append });
+    }
+
+    pub fn ide_views_register(&self, views: Vec<crate::ide_ext::ExtView>) {
+        self.notification(CoreNotification::IdeViewsRegister { views });
+    }
+
+    pub fn ide_webview_create(&self, webview: crate::ide_ext::WebviewCreate) {
+        self.notification(CoreNotification::IdeWebviewCreate { webview });
+    }
+
+    pub fn ide_webview_set_html(&self, handle: String, html: String) {
+        self.notification(CoreNotification::IdeWebviewSetHtml { handle, html });
+    }
+
+    pub fn ide_webview_set_title(&self, handle: String, title: String) {
+        self.notification(CoreNotification::IdeWebviewSetTitle { handle, title });
+    }
+
+    pub fn ide_webview_post_message(
+        &self,
+        handle: String,
+        message: serde_json::Value,
+    ) {
+        self.notification(CoreNotification::IdeWebviewPostMessage {
+            handle,
+            message,
+        });
+    }
+
+    pub fn ide_webview_dispose(&self, handle: String) {
+        self.notification(CoreNotification::IdeWebviewDispose { handle });
+    }
+
+    pub fn ide_decorations_set(
+        &self,
+        uri: lsp_types::Url,
+        decorations: Vec<crate::ide_ext::Decoration>,
+    ) {
+        self.notification(CoreNotification::IdeDecorationsSet { uri, decorations });
     }
 }
 

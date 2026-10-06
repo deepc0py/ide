@@ -1,5 +1,10 @@
-// Per-workspace worker thread: boots the real VS Code ExtensionHostMain wired
-// in-memory to our main-thread shim, then serves one LSP socket for the window.
+// The shared extension-host isolate: ONE VS Code `ExtensionHostMain` wired
+// in-memory to our main-thread shim, hosting EVERY open window as a single
+// multi-root workspace. Each window contributes its folder(s) and gets its own
+// LSP socket; the hub (`Session`) routes traffic per window. This is what keeps
+// memory flat: each extension and each language server (rust-analyzer, eslint, …)
+// loads ONCE for all windows instead of once per window.
+//
 // These two imports register all ExtHost* singletons (ILogService, extension
 // service, etc.) via side effects and MUST run before ExtensionHostMain.
 import '../.vscode-src/src/vs/workbench/api/common/extHost.common.services.js';
@@ -14,26 +19,23 @@ import { createInProcProtocolPair } from './inproc.js';
 import { scanExtensions } from './scanner.js';
 import { buildInitData } from './initdata.js';
 import { buildConfiguration } from './config.js';
-import { Session } from './session.js';
+import { Session, Workspace } from './session.js';
 import { installMainShim } from './mainshim.js';
 import { LspConnection } from './lsp.js';
 
 interface WorkerData {
-	workspaceId: string;
-	folders: string[];
 	dataDir: string;
 	logsDir: string;
 	home: string;
 	appRoot: string;
 	version: string;
 	extensionDirs: string[];
-	lspSocket: string;
 }
 
 const data = workerData as WorkerData;
 
 function log(msg: string): void {
-	const line = `[exthost ${data.workspaceId}] ${msg}`;
+	const line = `[exthost] ${msg}`;
 	if (parentPort) { parentPort.postMessage({ type: 'log', message: line }); }
 	else { console.error(line); }
 }
@@ -72,11 +74,10 @@ async function main(): Promise<void> {
 	const initData: IExtensionHostInitData = buildInitData({
 		dataDir: data.dataDir, logsDir: data.logsDir, appRoot: data.appRoot, version: data.version, extensions,
 	});
-	const configuration = buildConfiguration(extensions, data.dataDir, data.folders);
 
 	const { a: mainProtocol, b: extHostProtocol } = createInProcProtocolPair();
 	const rpc = new RPCProtocol(mainProtocol, null, null);
-	const session = new Session(rpc, data.workspaceId, data.folders, log);
+	const session = new Session(rpc, log);
 
 	const reconfigure = (key: string, value: unknown): void => {
 		const settingsFile = path.join(data.dataDir, 'User', 'settings.json');
@@ -84,7 +85,7 @@ async function main(): Promise<void> {
 		try { current = JSON.parse(fs.readFileSync(settingsFile, 'utf8')); } catch { /* none */ }
 		if (value === undefined) { delete current[key]; } else { current[key] = value; }
 		fs.writeFileSync(settingsFile, JSON.stringify(current, null, 2));
-		const next = buildConfiguration(extensions, data.dataDir, data.folders);
+		const next = buildConfiguration(extensions, data.dataDir, session.folders);
 		session.proxy(ExtHostContext.ExtHostConfiguration).$acceptConfigurationChanged(next, { keys: [key], overrides: [] }).catch(() => { /* ignore */ });
 	};
 
@@ -101,41 +102,80 @@ async function main(): Promise<void> {
 	const extHostMain = new ExtensionHostMain(extHostProtocol, initData, hostUtils, null);
 	void extHostMain;
 
-	// The ExtHost* actors register asynchronously during initialize(); retry until present.
+	// Configuration is window-independent (settings are global); initialize once.
+	const configuration = buildConfiguration(extensions, data.dataDir, []);
 	await driveWhenReady(() => session.proxy(ExtHostContext.ExtHostConfiguration).$initializeConfiguration(configuration) as unknown as Promise<void>, 'ExtHostConfiguration');
-	const workspaceData = {
-		id: data.workspaceId,
-		name: path.basename(data.folders[0] ?? 'workspace'),
-		folders: data.folders.map((f, index) => ({ uri: URI.file(f), name: path.basename(f), index })),
-		configuration: data.folders.length > 1 ? URI.file(path.join(data.folders[0], 'ide.code-workspace')) : null,
-		isUntitled: false,
-		transient: false,
+	log('configuration initialized; ready for windows');
+
+	let workspaceInitialized = false;
+
+	// Push the current multi-root folder set into the ext host. The first call
+	// initializes the workspace (kicking off eager + workspaceContains activation);
+	// later calls fire onDidChangeWorkspace({added,removed}), which the ext host uses
+	// to run workspaceContains activation for newly added folders (e.g. a window that
+	// opens a Cargo project after startup) and to let extensions drop closed folders.
+	const syncWorkspace = async (): Promise<void> => {
+		const folders = session.folders;
+		const workspaceData = {
+			id: 'ide-shared',
+			name: 'ide',
+			folders: folders.map((f, index) => ({ uri: URI.file(f), name: path.basename(f), index })),
+			configuration: URI.file(path.join(data.dataDir, 'ide.code-workspace')),
+			isUntitled: false,
+			transient: false,
+		};
+		if (!workspaceInitialized) {
+			await driveWhenReady(() => session.proxy(ExtHostContext.ExtHostWorkspace).$initializeWorkspace(workspaceData, true) as unknown as Promise<void>, 'ExtHostWorkspace');
+			workspaceInitialized = true;
+		} else {
+			session.proxy(ExtHostContext.ExtHostWorkspace).$acceptWorkspaceData(workspaceData);
+		}
 	};
-	await driveWhenReady(() => session.proxy(ExtHostContext.ExtHostWorkspace).$initializeWorkspace(workspaceData, true) as unknown as Promise<void>, 'ExtHostWorkspace');
-	log('workspace initialized; extension host starting');
 
-	// Serve the LSP socket.
-	try { fs.unlinkSync(data.lspSocket); } catch { /* fresh */ }
-	const server = net.createServer((socket) => {
-		log('LSP client connected');
-		const connection = new LspConnection(session, socket);
-		void connection;
-		socket.on('close', () => session.detachClient());
-	});
-	server.listen(data.lspSocket, () => {
-		log(`LSP socket listening at ${data.lspSocket}`);
-		parentPort?.postMessage({ type: 'ready' });
-	});
+	const openWorkspace = async (id: string, folders: string[], lspSocket: string): Promise<void> => {
+		const ws = new Workspace(id, folders);
+		session.addWorkspace(ws);
+		await syncWorkspace();
+		try { fs.unlinkSync(lspSocket); } catch { /* fresh */ }
+		const server = net.createServer((socket) => {
+			log(`LSP client connected (${id})`);
+			const connection = new LspConnection(session, ws, socket);
+			void connection;
+			socket.on('close', () => ws.detachClient());
+		});
+		ws.server = server;
+		await new Promise<void>((resolve) => server.listen(lspSocket, resolve));
+		log(`window ${id} open: ${folders.join(', ')}`);
+		parentPort?.postMessage({ type: 'workspaceReady', id });
+	};
 
-	parentPort?.on('message', (msg: { type: string }) => {
-		if (msg.type === 'stats') {
-			parentPort?.postMessage({ type: 'stats', heapUsed: process.memoryUsage().heapUsed, workspaceId: data.workspaceId });
+	const closeWorkspace = async (id: string): Promise<void> => {
+		const ws = session.workspaces.get(id);
+		if (!ws) { return; }
+		ws.server?.close();
+		session.removeWorkspace(id);
+		// Remove this window's documents so they stop resolving / routing.
+		for (const [uri] of session.documents) {
+			if (session.workspaceForUri(uri) === undefined) { session.documents.delete(uri); }
+		}
+		await syncWorkspace();
+		log(`window ${id} closed`);
+	};
+
+	parentPort?.on('message', (msg: { type: string; id?: string; folders?: string[]; lspSocket?: string }) => {
+		if (msg.type === 'openWorkspace') {
+			openWorkspace(msg.id!, msg.folders ?? [], msg.lspSocket!).catch((err) => log(`openWorkspace ${msg.id} failed: ${String(err)}`));
+		} else if (msg.type === 'closeWorkspace') {
+			closeWorkspace(msg.id!).catch((err) => log(`closeWorkspace ${msg.id} failed: ${String(err)}`));
+		} else if (msg.type === 'stats') {
+			parentPort?.postMessage({ type: 'stats', heapUsed: process.memoryUsage().heapUsed });
 		} else if (msg.type === 'close') {
-			try { extHostMain.terminate('workspace closed'); } catch { /* ignore */ }
-			server.close();
+			try { extHostMain.terminate('host shutdown'); } catch { /* ignore */ }
 			realExit(0);
 		}
 	});
+
+	parentPort?.postMessage({ type: 'booted' });
 }
 
 main().catch((err) => {

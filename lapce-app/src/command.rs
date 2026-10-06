@@ -390,6 +390,10 @@ pub enum LapceWorkbenchCommand {
     #[strum(serialize = "palette.command")]
     PaletteCommand,
 
+    #[strum(message = "Show Extension Commands")]
+    #[strum(serialize = "palette.extension_command")]
+    PaletteExtensionCommand,
+
     #[strum(message = "Open Recent Workspace")]
     #[strum(serialize = "palette.workspace")]
     PaletteWorkspace,

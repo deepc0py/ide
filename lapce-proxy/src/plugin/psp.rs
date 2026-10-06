@@ -1182,6 +1182,9 @@ impl PluginHostHandler {
                 }
                 self.catalog_rpc.core_rpc.server_status(param);
             }
+            method if method.starts_with("ide/") => {
+                self.handle_ide_notification(method, params)?;
+            }
             _ => {
                 self.core_rpc.log(
                     lapce_rpc::core::LogLevel::Warn,
@@ -1191,6 +1194,73 @@ impl PluginHostHandler {
                         self.volt_id.author, self.volt_id.name
                     )),
                 );
+            }
+        }
+        Ok(())
+    }
+
+    /// Translate a custom `ide/*` notification from the shared extension host's
+    /// per-workspace LSP server into a [`CoreNotification`] the UI renders.
+    fn handle_ide_notification(
+        &mut self,
+        method: &str,
+        params: Params,
+    ) -> Result<()> {
+        use lapce_rpc::ide_ext::{self, method as m};
+        let value = serde_json::to_value(params)?;
+        let core = &self.catalog_rpc.core_rpc;
+        match method {
+            m::STATUS_BAR_SET => {
+                let item: ide_ext::StatusBarItem = serde_json::from_value(value)?;
+                core.ide_status_bar_set(item);
+            }
+            m::STATUS_BAR_REMOVE => {
+                #[derive(serde::Deserialize)]
+                struct P {
+                    id: String,
+                }
+                let p: P = serde_json::from_value(value)?;
+                core.ide_status_bar_remove(p.id);
+            }
+            m::COMMANDS_CHANGED => {
+                let p: ide_ext::CommandsChangedParams =
+                    serde_json::from_value(value)?;
+                core.ide_commands_changed(p.commands);
+            }
+            m::OUTPUT_APPEND => {
+                let p: ide_ext::OutputAppendParams = serde_json::from_value(value)?;
+                core.ide_output_append(p);
+            }
+            m::VIEWS_REGISTER => {
+                let view: ide_ext::ExtView = serde_json::from_value(value)?;
+                core.ide_views_register(vec![view]);
+            }
+            m::WEBVIEW_CREATE => {
+                let webview: ide_ext::WebviewCreate = serde_json::from_value(value)?;
+                core.ide_webview_create(webview);
+            }
+            m::WEBVIEW_SET_HTML => {
+                let p: ide_ext::WebviewSetHtml = serde_json::from_value(value)?;
+                core.ide_webview_set_html(p.handle, p.html);
+            }
+            m::WEBVIEW_SET_TITLE => {
+                let p: ide_ext::WebviewSetTitle = serde_json::from_value(value)?;
+                core.ide_webview_set_title(p.handle, p.title);
+            }
+            m::WEBVIEW_POST_MESSAGE => {
+                let p: ide_ext::WebviewPostMessage = serde_json::from_value(value)?;
+                core.ide_webview_post_message(p.handle, p.message);
+            }
+            m::WEBVIEW_DISPOSE => {
+                let p: ide_ext::WebviewDispose = serde_json::from_value(value)?;
+                core.ide_webview_dispose(p.handle);
+            }
+            m::DECORATIONS_SET => {
+                let p: ide_ext::DecorationsSet = serde_json::from_value(value)?;
+                core.ide_decorations_set(p.uri, p.decorations);
+            }
+            _ => {
+                tracing::debug!("unhandled ide/* notification: {method}");
             }
         }
         Ok(())

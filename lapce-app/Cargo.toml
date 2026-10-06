@@ -68,6 +68,11 @@ json5            = { version = "0.4.1" }
 fs_extra    = "1.2.0"
 dmg         = "0.1.1"
 ide-webview = { path = "../ide-webview", optional = true }
+# Used (with the `webview` feature) to obtain the floem window's NSView as the
+# parent handle for the native extension webview.
+objc2            = { version = "0.6", optional = true }
+objc2-app-kit    = { version = "0.3", optional = true, features = ["NSApplication", "NSResponder", "NSWindow", "NSView"] }
+objc2-foundation = { version = "0.3", optional = true }
 
 [target.'cfg(windows)'.dependencies.windows-sys]
 workspace = true
@@ -79,7 +84,7 @@ portable       = ["lapce-core/portable"]
 updater        = []
 vendored-fonts = []
 # Host native VS Code extension webviews via the `ide-webview` crate (macOS).
-webview        = ["dep:ide-webview"]
+webview        = ["dep:ide-webview", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]
 
 [dev-dependencies]
 criterion = "0.5"

@@ -231,6 +231,13 @@ pub enum ProxyRequest {
         path: PathBuf,
         position: Position,
     },
+    /// Route a raw JSON-RPC request to the shared extension host's attached
+    /// per-workspace LSP server (e.g. `workspace/executeCommand`,
+    /// `ide/commands/list`, `ide/webview/resolveView`).
+    ExtHostRequest {
+        method: String,
+        params: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -371,6 +378,12 @@ pub enum ProxyNotification {
         languages: Vec<String>,
         extensions: Vec<String>,
     },
+    /// Route a raw JSON-RPC notification to the shared extension host's attached
+    /// per-workspace LSP server (e.g. `ide/webview/onMessage`).
+    ExtHostNotification {
+        method: String,
+        params: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -491,6 +504,9 @@ pub enum ProxyResponse {
     },
     GetDocumentHighlights {
         highlights: Option<Vec<DocumentHighlight>>,
+    },
+    ExtHostResponse {
+        result: serde_json::Value,
     },
 }
 
@@ -634,6 +650,27 @@ impl ProxyRpcHandler {
             languages,
             extensions,
         });
+    }
+
+    /// Send a raw JSON-RPC request to the shared extension host's attached
+    /// per-workspace LSP server and deliver the response to `f`.
+    pub fn ext_host_request(
+        &self,
+        method: String,
+        params: serde_json::Value,
+        f: impl ProxyCallback + 'static,
+    ) {
+        self.request_async(ProxyRequest::ExtHostRequest { method, params }, f);
+    }
+
+    /// Send a raw JSON-RPC notification to the shared extension host's attached
+    /// per-workspace LSP server.
+    pub fn ext_host_notification(
+        &self,
+        method: String,
+        params: serde_json::Value,
+    ) {
+        self.notification(ProxyNotification::ExtHostNotification { method, params });
     }
 
     pub fn git_init(&self) {

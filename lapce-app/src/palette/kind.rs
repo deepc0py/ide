@@ -9,6 +9,7 @@ pub enum PaletteKind {
     FileChooser,
     Line,
     Command,
+    ExtensionCommand,
     Workspace,
     Reference,
     DocumentSymbol,
@@ -50,6 +51,7 @@ impl PaletteKind {
             | PaletteKind::LineEnding
             | PaletteKind::SCMReferences
             | PaletteKind::HelpAndFile
+            | PaletteKind::ExtensionCommand
             | PaletteKind::DiffFiles => "",
             #[cfg(windows)]
             PaletteKind::WslHost => "",
@@ -83,6 +85,9 @@ impl PaletteKind {
             }
             PaletteKind::Workspace => Some(LapceWorkbenchCommand::PaletteWorkspace),
             PaletteKind::Command => Some(LapceWorkbenchCommand::PaletteCommand),
+            PaletteKind::ExtensionCommand => {
+                Some(LapceWorkbenchCommand::PaletteExtensionCommand)
+            }
             PaletteKind::File => Some(LapceWorkbenchCommand::Palette),
             PaletteKind::FileChooser => None,
             PaletteKind::HelpAndFile => {
@@ -134,6 +139,7 @@ impl PaletteKind {
             | PaletteKind::Language
             | PaletteKind::LineEnding
             | PaletteKind::SCMReferences | PaletteKind::HelpAndFile
+            | PaletteKind::ExtensionCommand
             | PaletteKind::DiffFiles => input,
             PaletteKind::PaletteHelp
             | PaletteKind::Command
