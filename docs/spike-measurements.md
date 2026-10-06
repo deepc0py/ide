@@ -9,3 +9,8 @@ RSS of matched processes and all descendants (shared pages are double-counted, s
 | VS Code 1.x stable (Electron), fresh profile | none (built-ins only) | 39 | 6441 MB |
 | Lapce 0.4.6 (upstream), `lapce <path>` x8 | n/a | 17 | 417 MB — **but only 1 window**: upstream forwards folders as tabs of the existing window |
 | ide (Lapce fork, folders open as new windows), 8 real windows (verified via CGWindowList) | none yet | 17 (1 ide + 16 shells) | 437 MB |
+| Zed stable (GPUI, GPL-3.0 editor), `cli --new` x8 | none | 2 | 420 MB (9 windows incl. startup window) |
+
+Not measured: VS Code workbench inside WKWebView (Tauri/wry). VS Code's per-window renderer above is 75–120 MB and
+the per-window extension host 60–120 MB; a WKWebView-hosted workbench carries the same JS workbench heap per window,
+so it lands in the same band as Electron minus the Chromium overhead. [INFERENCE]
