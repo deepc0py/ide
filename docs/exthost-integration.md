@@ -47,8 +47,10 @@ never outlives the IDE/test process (which previously hung `cargo test` for
 On `ProxyNotification::Initialize` the `Dispatcher` (off-thread, so node boot
 never blocks the proxy loop):
 
-1. `exthost::open_workspace([window folder])` → `{workspaceId, lspSocket}`.
-2. `proxy.attach_lsp_server("exthost", lspSocket, [], [])` — empty
+1. `exthost::open_workspace([window folder])` → `{workspaceId, lspSocket,
+   providedLanguages}`.
+2. `proxy.attach_lsp_server("exthost", lspSocket, [], [], providedLanguages)` —
+   empty
    languages/extensions means **match all documents**
    (`LspServerConfig::matches`/`document_selector` catch-all), so every file in
    the window is routed to the host for its extensions to triage.
@@ -69,6 +71,40 @@ don't handle) from shadowing or blocking the real answer — the regression that
 made `lsp_servers typescript` time out for 120s. Regression test:
 `lapce-proxy/tests/lsp_aggregation.rs`.
 
+### Dedup: one language server per host, not per window
+
+The host would otherwise run a *second* rust-analyzer — the native IDE ships a
+built-in rust-analyzer (`lapce-proxy/src/plugin/lsp_config.rs`
+`default_lsp_servers`) that `maybe_start_lsp` spawns per workspace when a `.rs`
+file opens, **and** the `rust-lang.rust-analyzer` extension spawns its own inside
+the shared host. Two rust-analyzers per window is the opposite of the goal.
+
+So the host advertises, in its `host/openWorkspace` reply, the languages for
+which an installed extension provides a *full* language server
+(`providedLanguages`; `exthost/src/host.ts` `LANGUAGE_SERVER_EXTENSIONS` maps
+`rust-lang.rust-analyzer → rust`, `ms-python.python → python` — linters/
+formatters like eslint/prettier are excluded, they have no definitions). The
+proxy threads this list through `AttachLspServer` into
+`PluginCatalog::suppressed_languages`; `maybe_start_lsp` then **never** starts a
+built-in server for a suppressed language. The host's single rust-analyzer
+(shared across all windows/worktrees) is authoritative. TypeScript has no
+language-server extension among the six, so the built-in
+typescript-language-server still runs — that is how TS definitions/diagnostics
+are served. The bridge attaches at window `Initialize`, before any document
+opens, so suppression is in place before `maybe_start_lsp` can fire.
+
+### Product default settings (memory)
+
+Shipped defaults make the memory-heavy servers cheap without the user setting
+anything. `exthost/src/config.ts` `PRODUCT_DEFAULT_SETTINGS` overlays the
+`defaults` configuration layer (below `userLocal`, so any one is overridable in
+`settings.json`): `rust-analyzer.cachePriming.enable=false` (lazy indexing),
+`rust-analyzer.checkOnSave=false` (no `cargo check` rustc swarm — native
+rust-analyzer diagnostics still report type/borrow errors),
+`rust-analyzer.cargo.buildScripts.enable=false`,
+`rust-analyzer.procMacro.enable=false`, and `python.languageServer=Jedi`. See
+`exthost/MEMORY.md` for the measured effect.
+
 ## `ide/*` protocol → UI
 
 Custom notifications the host sends over that socket are parsed in
@@ -80,9 +116,9 @@ applies them to per-window reactive state (`lapce-app/src/ide_ext.rs`,
 
 | contribution | method(s) | render |
 | --- | --- | --- |
-| status-bar items | `ide/statusBar/set` / `remove` | `status.rs` — left/right items, clickable → `workspace/executeCommand` |
+| status-bar items | `ide/statusBar/set` / `remove` | `status.rs` — left/center(panel toggles)/right regions; each region is `.clip()`-wrapped and ext items are `flex_shrink(0)`, so items that don't fit are truncated/hidden by the clip (native cursor/LF/lang kept) and **never overlap** at any width (incl. 800px); clickable → `workspace/executeCommand` |
 | commands | `ide/commands/changed`, `ide/commands/list` | command palette (`PaletteKind::ExtensionCommand`, workbench cmd *Show Extension Commands*) → `workspace/executeCommand` |
-| inline decorations | `ide/decorations/set` | `doc.rs` phantom text — end-of-line "after" text (GitLens current-line blame) |
+| inline decorations | `ide/decorations/set` | `editor/view.rs::paint_ext_decorations` — dimmed end-of-line "after" text (GitLens current-line blame), painted as a viewport-clipped overlay (NOT phantom text), so it stays on the line's last visual row, truncates at the editor's right edge, and never affects real-text wrapping or spills onto an extra visual line |
 | webviews | `ide/webview/create` / `setHtml` / `postMessage` / `dispose`, `ide/webview/resolveView` | `webview_view.rs::ext_webview_panel` — native `WKWebView` dock; both-way `postMessage` via `ide/webview/onMessage` |
 | views | `ide/views/register` | webview views auto-resolved into the dock |
 
@@ -143,6 +179,17 @@ never leaks into window A. Panels (no single owner) still broadcast.
 `IDE_WEBVIEW_SELFTEST=1` the dock auto-opens and the DOM is probed (node count /
 `document.body.innerText`) and logged, proving rendering from outside the
 WKWebView's separate GPU surface (which `screencapture` cannot composite).
+
+Because `screencapture`'s window-list capture cannot composite the WKWebView's
+GPU surface (the dock region reads blank in a window screenshot even when the
+page is live), visibility is also proven by `WebviewController::snapshot` (→
+`Handle::snapshot_png`, `WKWebView takeSnapshotWithConfiguration:` → `NSImage` →
+PNG). With `IDE_WEBVIEW_SNAPSHOT_DIR=<dir>` the selftest writes a PNG of each
+window's live Claude view; a non-blank snapshot also proves the webview's
+frame/bounds are non-zero and on-screen (match the dock). Native webviews are
+created lazily: `ext_webview_panel`'s reconcile effect only calls
+`controller.attach` once `ide_ext.dock_visible` is true, so no hidden WKWebView
+surface exists while the dock is closed.
 
 ## Test
 
@@ -232,6 +279,32 @@ late joins). Per-window window-list captures in `/tmp/ide-smoke3/shots/`:
 As in Smoke/Smoke2 the WKWebView's separate GPU surface is not composited by
 `screencapture`, so the dock region captures blank; content is proven by the
 per-window selftest probe above and the integration/late-join tests.
+
+## Smoke4 (status-bar non-overlap, blame overlay, webview snapshots)
+
+Run `/tmp/ide-smoke4/s4_status.sh <width> <tag>` and `s4_webview.sh`
+(`IDE_WEBVIEW_SELFTEST=1`, `IDE_WEBVIEW_SNAPSHOT_DIR=<dir>`); screenshots in
+`/tmp/ide-smoke4/shots/`. The 800px window is the fresh-data-dir default; a
+specific width is seeded into `<IDE_DATA_DIR>/db/window` (floem clamps nothing —
+the display is 2560pt). Observed:
+
+- **Status bar, no overlap** — `statusbar-800.png`: the diagnostics counter and
+  panel-toggle icons no longer collide; the right region shows
+  `Prettier ESLint · Ln 1, Col 1, Char 0 · LF · TypeScript` cleanly, with the
+  ext items that don't fit (Claude Code, GitLens status) truncated/hidden by the
+  region clip rather than drawn over the natives. `statusbar-1400.png`: every
+  item fits and is fully visible, still non-overlapping.
+- **Inline blame on one line** — line 1 renders
+  `// window A marker    IDE Smoke3, 2 years ago • window A …` on a single visual
+  line, truncated with `…` at the editor's right edge; there is **no** stray
+  ellipsis/extra wrapped line below it (the regression the overlay fix removed).
+- **Claude webview rendered per window** — `webview-A/B/C.png` are
+  `WKWebView takeSnapshot` PNGs of windows A/B/C's own live views (handles
+  `ws-1/2/3`), each showing the real Claude Code login UI ("Welcome to Claude
+  Code", "Claude.ai Subscription", …). This proves the dock content renders with
+  correct (non-zero, on-screen) bounds in every window, even though the
+  window-list `win-B.png` capture shows the dock region blank (GPU surface not
+  composited by `screencapture`).
 
 ## Known gaps
 

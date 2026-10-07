@@ -149,6 +149,7 @@ fn attach_lsp_server_over_socket() {
         socket.clone(),
         vec!["plaintext".to_string()],
         vec!["txt".to_string()],
+        Vec::new(),
     );
 
     // Open the document so the server receives didOpen and is activated.

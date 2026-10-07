@@ -128,6 +128,7 @@ impl ProxyHandler for Dispatcher {
                                     res.lsp_socket,
                                     Vec::new(),
                                     Vec::new(),
+                                    res.provided_languages,
                                 );
                             }
                         });
@@ -442,6 +443,7 @@ impl ProxyHandler for Dispatcher {
                 socket,
                 languages,
                 extensions,
+                provides_languages,
             } => {
                 self.catalog_rpc.attach_lsp_server(LspServerConfig {
                     name,
@@ -452,6 +454,7 @@ impl ProxyHandler for Dispatcher {
                     socket: Some(socket),
                     install: None,
                     options: None,
+                    provides_languages,
                 });
             }
             ExtHostNotification { method, params } => {

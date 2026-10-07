@@ -125,6 +125,10 @@ fn program_on_path(program: &str) -> Option<PathBuf> {
 pub struct OpenWorkspaceResult {
     pub workspace_id: String,
     pub lsp_socket: PathBuf,
+    /// Languages for which the host's installed extensions provide a full
+    /// language server (e.g. `rust` when the rust-analyzer extension is present).
+    /// The proxy suppresses its duplicate built-in server for these languages.
+    pub provided_languages: Vec<String>,
 }
 
 /// A live connection to the host's control socket, owning the child process.
@@ -348,9 +352,19 @@ pub fn open_workspace(folders: Vec<PathBuf>) -> Option<OpenWorkspaceResult> {
                 .get("lspSocket")
                 .and_then(Value::as_str)
                 .map(PathBuf::from)?;
+            let provided_languages = result
+                .get("providedLanguages")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
             Some(OpenWorkspaceResult {
                 workspace_id,
                 lsp_socket,
+                provided_languages,
             })
         }
         Err(e) => {

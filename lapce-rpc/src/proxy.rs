@@ -377,6 +377,11 @@ pub enum ProxyNotification {
         socket: PathBuf,
         languages: Vec<String>,
         extensions: Vec<String>,
+        /// Languages for which this server is authoritative, so the proxy must
+        /// suppress any duplicate built-in server for them (dedup). Empty for
+        /// ordinary servers; set by the shared extension host bridge.
+        #[serde(default)]
+        provides_languages: Vec<String>,
     },
     /// Route a raw JSON-RPC notification to the shared extension host's attached
     /// per-workspace LSP server (e.g. `ide/webview/onMessage`).
@@ -643,12 +648,14 @@ impl ProxyRpcHandler {
         socket: PathBuf,
         languages: Vec<String>,
         extensions: Vec<String>,
+        provides_languages: Vec<String>,
     ) {
         self.notification(ProxyNotification::AttachLspServer {
             name,
             socket,
             languages,
             extensions,
+            provides_languages,
         });
     }
 

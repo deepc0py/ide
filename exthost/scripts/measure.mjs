@@ -110,15 +110,13 @@ async function main() {
   rmSync(DATA, { recursive: true, force: true });
   mkdirSync(path.join(DATA, 'User'), { recursive: true });
   mkdirSync(HOME, { recursive: true });
+  // Shipped product defaults only — NO memory-saving overrides here. The
+  // low-memory levers (rust-analyzer.cachePriming/checkOnSave/buildScripts/
+  // procMacro off, python Jedi) now live in the host's default configuration
+  // layer (exthost/src/config.ts PRODUCT_DEFAULT_SETTINGS), so this measurement
+  // reflects exactly what users get and agrees with bench/membench.py.
   writeFileSync(path.join(DATA, 'User', 'settings.json'), JSON.stringify({
     'telemetry.telemetryLevel': 'off',
-    'python.languageServer': 'Jedi',
-    'rust-analyzer.checkOnSave': false,
-    'rust-analyzer.cargo.buildScripts.enable': false,
-    'rust-analyzer.procMacro.enable': false,
-    'rust-analyzer.cachePriming.enable': false,
-    'gitlens.codeLens.enabled': false,
-    'eslint.useFlatConfig': true,
   }, null, 2));
 
   const env = {

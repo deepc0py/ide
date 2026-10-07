@@ -44,6 +44,11 @@ pub struct LspServerConfig {
     pub install: Option<InstallCommand>,
     /// LSP `initializationOptions` sent to the server on startup.
     pub options: Option<serde_json::Value>,
+    /// Languages for which this server is authoritative; the catalog suppresses
+    /// any duplicate built-in server for these. Non-empty only for the shared
+    /// extension host bridge (e.g. `rust` when the rust-analyzer extension is
+    /// installed), so one rust-analyzer runs per host instead of one per window.
+    pub provides_languages: Vec<String>,
 }
 
 /// A command run to install a missing default language server.
@@ -186,6 +191,7 @@ pub fn default_lsp_servers() -> Vec<LspServerConfig> {
                     "rust-analyzer".to_string(),
                 ],
             }),
+            provides_languages: Vec::new(),
         },
         LspServerConfig {
             name: "typescript-language-server".to_string(),
@@ -218,6 +224,7 @@ pub fn default_lsp_servers() -> Vec<LspServerConfig> {
                     "typescript-language-server".to_string(),
                 ],
             }),
+            provides_languages: Vec::new(),
         },
     ]
 }
@@ -305,6 +312,7 @@ pub fn merge_lsp_server_file(
                 socket: entry.socket,
                 install: None,
                 options: None,
+                provides_languages: Vec::new(),
             });
         }
     }

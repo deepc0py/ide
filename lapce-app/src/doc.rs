@@ -1937,33 +1937,6 @@ impl DocumentPhantom for Doc {
 
         text.append(&mut diag_text);
 
-        // Inline "after" decorations from the shared extension host (e.g.
-        // GitLens current-line blame): render dimmed at the end of the line
-        // the decoration's range ends on.
-        let mut ext_deco_text: SmallVec<[PhantomText; 6]> = self
-            .ext_decorations
-            .get_untracked()
-            .iter()
-            .filter(|d| d.range.end.line as usize == line)
-            .filter_map(|d| {
-                let after = d.after.as_ref()?;
-                if after.content_text.is_empty() {
-                    return None;
-                }
-                Some(PhantomText {
-                    kind: PhantomTextKind::Diagnostic,
-                    col: end_offset - start_offset,
-                    affinity: Some(CursorAffinity::Backward),
-                    text: format!("    {}", after.content_text),
-                    fg: Some(config.color(LapceColor::INLAY_HINT_FOREGROUND)),
-                    font_size: Some(config.editor.inlay_hint_font_size()),
-                    bg: None,
-                    under_line: None,
-                })
-            })
-            .collect();
-        text.append(&mut ext_deco_text);
-
         let (completion_line, completion_col) = self.completion_pos.get_untracked();
         let completion_text = config
             .editor

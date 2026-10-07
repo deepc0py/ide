@@ -10,7 +10,7 @@ use floem::{
         Memo, ReadSignal, RwSignal, SignalGet, SignalUpdate, SignalWith, create_memo,
     },
     style::{AlignItems, CursorStyle, Display},
-    views::{Decorators, dyn_stack, label, stack, svg},
+    views::{ClipExt, Decorators, dyn_stack, label, stack, svg},
 };
 use indexmap::IndexMap;
 use lapce_core::mode::{Mode, VisualMode};
@@ -86,7 +86,7 @@ pub fn status(
                 ext_status_item(config, proxy.clone(), ide_ext_build.clone(), item)
             },
         )
-        .style(|s| s.height_pct(100.0).items_center())
+        .style(|s| s.height_pct(100.0).flex_shrink(0.0_f32).items_center())
     };
     let right_ext_items = {
         let ide_ext = ide_ext.clone();
@@ -99,7 +99,7 @@ pub fn status(
                 ext_status_item(config, proxy.clone(), ide_ext_build.clone(), item)
             },
         )
-        .style(|s| s.height_pct(100.0).items_center())
+        .style(|s| s.height_pct(100.0).flex_shrink(0.0_f32).items_center())
     };
     let mode = create_memo(move |_| window_tab_data.mode());
     let pointer_down = floem::reactive::create_rw_signal(false);
@@ -175,6 +175,7 @@ pub fn status(
                 })
                 .height_pct(100.0)
                 .padding_horiz(10.0)
+                .flex_shrink(0.0_f32)
                 .align_items(Some(AlignItems::Center))
                 .hover(|s| {
                     s.cursor(CursorStyle::Pointer).background(
@@ -245,6 +246,7 @@ pub fn status(
                 .style(move |s| {
                     s.height_pct(100.0)
                         .padding_horiz(10.0)
+                        .flex_shrink(0.0_f32)
                         .items_center()
                         .hover(|s| {
                             s.cursor(CursorStyle::Pointer).background(
@@ -258,11 +260,16 @@ pub fn status(
             progress_view(config, progresses),
             left_ext_items,
         ))
+        .style(|s| s.height_full().min_width(0.0).items_center())
+        .clip()
+        // The left region takes its natural width and only shrinks (clipping) when the
+        // bar is too narrow; all spare width goes to the right region so right-aligned
+        // extension items are not clipped while the left side sits empty.
         .style(|s| {
             s.height_pct(100.0)
                 .min_width(0.0)
-                .flex_basis(0.0)
-                .flex_grow(1.0f32)
+                .flex_grow(0.0f32)
+                .flex_shrink(1.0f32)
                 .items_center()
         }),
         stack((
@@ -346,6 +353,8 @@ pub fn status(
         ))
         .style(move |s| {
             s.height_pct(100.0)
+                .flex_shrink(0.0_f32)
+                .flex_grow(0.0_f32)
                 .items_center()
                 .color(config.get().color(LapceColor::STATUS_FOREGROUND))
         }),
@@ -413,10 +422,13 @@ pub fn status(
             });
             (right_ext_items, cursor_info, line_ending_info, language_info)
         })
+        .style(|s| s.height_full().width_full().min_width(0.0).justify_end())
+        .clip()
         .style(|s| {
             s.height_pct(100.0)
                 .flex_basis(0.0)
                 .flex_grow(1.0f32)
+                .min_width(0.0)
                 .justify_end()
         }),
     ))
@@ -493,6 +505,7 @@ fn status_text<S: std::fmt::Display + 'static>(
         s.display(display)
             .height_full()
             .padding_horiz(10.0)
+            .flex_shrink(0.0_f32)
             .items_center()
             .color(config.color(LapceColor::STATUS_FOREGROUND))
             .hover(|s| {

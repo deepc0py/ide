@@ -74,12 +74,10 @@ async function main() {
 		path.join(DATA_DIR, 'User', 'settings.json'),
 		JSON.stringify(
 			{
+				// Memory levers + Jedi are shipped product defaults now (see
+				// exthost/src/config.ts); keep only feature/test-stability knobs.
 				'telemetry.telemetryLevel': 'off',
-				'python.languageServer': 'Jedi',
 				'python.experiments.enabled': false,
-				'rust-analyzer.checkOnSave': false,
-				'rust-analyzer.cargo.buildScripts.enable': false,
-				'rust-analyzer.procMacro.enable': false,
 				'gitlens.currentLine.enabled': true,
 				'gitlens.statusBar.enabled': true,
 				'gitlens.codeLens.enabled': false,

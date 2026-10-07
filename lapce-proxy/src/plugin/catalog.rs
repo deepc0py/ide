@@ -49,6 +49,9 @@ pub struct PluginCatalog {
     open_files: HashMap<PathBuf, String>,
     lsp_configs: Vec<LspServerConfig>,
     started_lsp: HashSet<String>,
+    /// Languages a socket-attached server (the shared extension host bridge) is
+    /// authoritative for; the matching built-in server is never started for them.
+    suppressed_languages: HashSet<String>,
 }
 
 impl PluginCatalog {
@@ -72,6 +75,7 @@ impl PluginCatalog {
                 lapce_core::directory::Directory::config_directory(),
             ),
             started_lsp: HashSet::new(),
+            suppressed_languages: HashSet::new(),
         };
 
         thread::spawn(move || {
@@ -382,6 +386,11 @@ impl PluginCatalog {
     /// Start any built-in language server whose config matches this document and
     /// has not already been started for this workspace.
     fn maybe_start_lsp(&mut self, language_id: &str, path: Option<&Path>) {
+        // A socket-attached server (the shared extension host bridge) may already
+        // be authoritative for this language; never start the duplicate built-in.
+        if self.suppressed_languages.contains(language_id) {
+            return;
+        }
         let to_start: Vec<LspServerConfig> = self
             .lsp_configs
             .iter()
@@ -867,6 +876,14 @@ impl PluginCatalog {
                 );
             }
             AttachLspServer(config) => {
+                // The host bridge is authoritative for these languages: record
+                // them so maybe_start_lsp never spawns the duplicate built-in
+                // server (e.g. a second rust-analyzer per window). The bridge is
+                // attached at window Initialize, before any document opens, so
+                // the suppression is in place before maybe_start_lsp can fire.
+                for lang in &config.provides_languages {
+                    self.suppressed_languages.insert(lang.clone());
+                }
                 self.started_lsp.insert(config.name.clone());
                 self.start_lsp_config(config);
             }

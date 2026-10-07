@@ -46,6 +46,36 @@ function discoverExtensionDirs(): string[] {
 	return out;
 }
 
+// Extensions that ship a *full* language server (go-to-definition, hover,
+// diagnostics) for a language. When one of these is installed the native IDE
+// must NOT also start its own built-in server for that language — the host's
+// server is authoritative, so the two would otherwise both load rust-analyzer
+// for the same workspace (see docs/exthost-integration.md, "Dedup"). Pure
+// linters/formatters (eslint, prettier) are deliberately absent: they don't
+// provide definitions, so the built-in server must stay.
+const LANGUAGE_SERVER_EXTENSIONS: Record<string, string[]> = {
+	'rust-lang.rust-analyzer': ['rust'],
+	'ms-python.python': ['python'],
+};
+
+// Languages for which an installed extension provides a full language server, so
+// the Rust side can suppress its duplicate built-in server. Computed once.
+let cachedProvidedLanguages: string[] | null = null;
+function providedLanguages(): string[] {
+	if (cachedProvidedLanguages) { return cachedProvidedLanguages; }
+	const langs = new Set<string>();
+	for (const dir of discoverExtensionDirs()) {
+		let id = '';
+		try {
+			const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+			id = `${pkg.publisher}.${pkg.name}`.toLowerCase();
+		} catch { continue; }
+		for (const lang of LANGUAGE_SERVER_EXTENSIONS[id] ?? []) { langs.add(lang); }
+	}
+	cachedProvidedLanguages = [...langs];
+	return cachedProvidedLanguages;
+}
+
 // ---- the single shared extension-host worker --------------------------------
 
 interface WorkspaceHandle { id: string; lspSocket: string; folders: string[]; }
@@ -77,7 +107,7 @@ function ensureWorker(): Promise<void> {
 	return promise;
 }
 
-async function openWorkspace(folders: string[]): Promise<{ workspaceId: string; lspSocket: string }> {
+async function openWorkspace(folders: string[]): Promise<{ workspaceId: string; lspSocket: string; providedLanguages: string[] }> {
 	await ensureWorker();
 	const id = `ws-${++counter}`;
 	const lspSocket = path.join(dataDir, `lsp-${id}.sock`);
@@ -86,7 +116,7 @@ async function openWorkspace(folders: string[]): Promise<{ workspaceId: string; 
 	readyWaiters.set(id, resolve);
 	worker!.postMessage({ type: 'openWorkspace', id, folders, lspSocket });
 	await promise;
-	return { workspaceId: id, lspSocket };
+	return { workspaceId: id, lspSocket, providedLanguages: providedLanguages() };
 }
 
 async function closeWorkspace(workspaceId: string): Promise<void> {

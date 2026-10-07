@@ -20,6 +20,7 @@ use floem::{
     },
     style::{CursorColor, CursorStyle, Style, TextColor},
     taffy::prelude::NodeId,
+    text::{Attrs, AttrsList, LineHeightValue, TextLayout},
     views::{
         Decorators, clip, container, dyn_stack,
         editor::{
@@ -1061,6 +1062,63 @@ impl EditorView {
             }
         }
     }
+
+    /// Paint the shared extension host's inline "after" decorations (e.g.
+    /// GitLens current-line blame) as a dimmed overlay at the end of the line
+    /// the decoration ends on. Unlike phantom text, this is NOT part of the
+    /// wrapped text layout, so it never affects wrapping of the real text and
+    /// never spills onto an extra visual line; it is clipped to the viewport's
+    /// right edge (truncated) when it would overflow.
+    fn paint_ext_decorations(
+        &self,
+        cx: &mut PaintCx,
+        viewport: Rect,
+        screen_lines: &ScreenLines,
+        config: &LapceConfig,
+    ) {
+        let doc = self.editor.doc();
+        let decorations = doc.ext_decorations.get_untracked();
+        if decorations.is_empty() {
+            return;
+        }
+        let ed = &self.editor.editor;
+        let edid = ed.id();
+        let style = ed.style();
+        let line_height = config.editor.line_height() as f32;
+        let fg = config.color(LapceColor::INLAY_HINT_FOREGROUND);
+        let font_size = config.editor.inlay_hint_font_size();
+
+        // Clip to the viewport so the blame is truncated at the editor's right
+        // edge instead of overflowing or forcing a wrapped line.
+        cx.save();
+        cx.clip(&viewport);
+        for (line, y) in screen_lines.iter_lines_y() {
+            let Some(after) = decorations
+                .iter()
+                .filter(|d| d.range.end.line as usize == line)
+                .find_map(|d| {
+                    d.after
+                        .as_ref()
+                        .filter(|a| !a.content_text.is_empty())
+                        .map(|a| a.content_text.clone())
+                })
+            else {
+                continue;
+            };
+            let text_layout = ed.text_layout(line);
+            let end_x = text_layout.text.size().width;
+            let family = style.font_family(edid, line);
+            let attrs = Attrs::new()
+                .color(fg)
+                .family(&family)
+                .font_size(font_size as f32)
+                .line_height(LineHeightValue::Px(line_height));
+            let mut blame = TextLayout::new();
+            blame.set_text(&format!("    {after}"), AttrsList::new(attrs), None);
+            cx.draw_text(&blame, Point::new(end_x, y));
+        }
+        cx.restore();
+    }
 }
 
 impl View for EditorView {
@@ -1205,6 +1263,8 @@ impl View for EditorView {
             is_active,
             &screen_lines,
         );
+        let screen_lines = ed.screen_lines.get_untracked();
+        self.paint_ext_decorations(cx, viewport, &screen_lines, &config);
         let screen_lines = ed.screen_lines.get_untracked();
         self.paint_sticky_headers(cx, viewport, &screen_lines);
         self.paint_scroll_bar(cx, viewport, is_local, config);

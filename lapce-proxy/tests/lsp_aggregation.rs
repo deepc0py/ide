@@ -187,10 +187,12 @@ fn definition_aggregates_across_servers_without_empty_shadowing() {
         empty_socket,
         Vec::new(),
         Vec::new(),
+        Vec::new(),
     );
     h.proxy.attach_lsp_server(
         "mock-real".to_string(),
         real_socket,
+        Vec::new(),
         Vec::new(),
         Vec::new(),
     );

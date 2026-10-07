@@ -173,6 +173,54 @@ impl Handle {
             .map_err(|e| WebviewError::Backend(e.to_string()))
     }
 
+    /// Capture the live `WKWebView`'s rendered pixels to a PNG at `path`,
+    /// invoking `cb(true)` on success. This proves the page is actually
+    /// rendered/visible even though macOS `screencapture` cannot composite the
+    /// webview's separate GPU surface into window-list captures. Asynchronous:
+    /// the completion handler runs on the main run loop.
+    pub fn snapshot_png(
+        &self,
+        path: std::path::PathBuf,
+        cb: impl Fn(bool) + 'static,
+    ) -> Result<(), WebviewError> {
+        use block2::RcBlock;
+        use objc2::runtime::AnyObject;
+        use objc2_app_kit::{
+            NSBitmapImageFileType, NSBitmapImageRep, NSBitmapImageRepPropertyKey,
+            NSImage,
+        };
+        use objc2_foundation::{NSDictionary, NSError, NSString};
+        use wry::WebViewExtMacOS;
+
+        let webview = self.webview.webview();
+        let block = RcBlock::new(move |image: *mut NSImage, _err: *mut NSError| {
+            let ok = (|| -> Option<()> {
+                if image.is_null() {
+                    return None;
+                }
+                let image: &NSImage = unsafe { &*image };
+                let tiff = image.TIFFRepresentation()?;
+                let rep = NSBitmapImageRep::imageRepWithData(&tiff)?;
+                let props =
+                    NSDictionary::<NSBitmapImageRepPropertyKey, AnyObject>::new();
+                let png = unsafe {
+                    rep.representationUsingType_properties(
+                        NSBitmapImageFileType::PNG,
+                        &props,
+                    )
+                }?;
+                let nspath = NSString::from_str(&path.to_string_lossy());
+                png.writeToFile_atomically(&nspath, true).then_some(())
+            })()
+            .is_some();
+            cb(ok);
+        });
+        unsafe {
+            webview.takeSnapshotWithConfiguration_completionHandler(None, &*block);
+        }
+        Ok(())
+    }
+
     /// Dispose the webview, removing it from its parent window.
     pub fn dispose(self) {
         // Dropping `WebView` detaches and releases the native view.

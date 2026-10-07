@@ -44,15 +44,14 @@ before(async () => {
 	rmSync(DATA_DIR, { recursive: true, force: true });
 	mkdirSync(path.join(DATA_DIR, 'User'), { recursive: true });
 	mkdirSync(HOME_DIR, { recursive: true });
+	// Memory-lever + Jedi settings are now shipped product defaults (see
+	// exthost/src/config.ts PRODUCT_DEFAULT_SETTINGS); this test relies on them
+	// instead of re-specifying them, so it exercises the real default config.
+	// Only feature-enabling / test-stability settings remain here.
 	writeFileSync(path.join(DATA_DIR, 'User', 'settings.json'), JSON.stringify({
 		'telemetry.telemetryLevel': 'off',
-		'python.languageServer': 'Jedi',
 		'python.experiments.enabled': false,
 		'python.terminal.activateEnvironment': false,
-		'rust-analyzer.checkOnSave': false,
-		'rust-analyzer.cargo.buildScripts.enable': false,
-		'rust-analyzer.procMacro.enable': false,
-		'rust-analyzer.cachePriming.enable': false,
 		'gitlens.currentLine.enabled': true,
 		'gitlens.statusBar.enabled': true,
 		'gitlens.codeLens.enabled': false,

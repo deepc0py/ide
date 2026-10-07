@@ -143,6 +143,21 @@ impl WebviewController {
         }
     }
 
+    /// Capture the live webview's rendered pixels to a PNG at `path`, invoking
+    /// `cb(true)` on success. Proves the page is visibly rendered independent of
+    /// `screencapture` (which cannot composite the WKWebView's GPU surface).
+    pub fn snapshot(
+        &self,
+        id: WebviewId,
+        path: std::path::PathBuf,
+        cb: impl Fn(bool) + 'static,
+    ) -> Result<(), WebviewError> {
+        match self.webviews.borrow().get(&id) {
+            Some(handle) => handle.snapshot_png(path, cb),
+            None => Ok(()),
+        }
+    }
+
     /// Update the placeholder's window-relative origin (from floem `on_move`).
     fn set_origin(&self, id: WebviewId, origin: Point) {
         let bounds = {
@@ -374,10 +389,17 @@ pub fn ext_webview_panel(window_tab_data: Rc<WindowTabData>) -> impl View {
         create_effect(move |_| {
             let webviews = ide_ext.webviews.get();
             let active = ide_ext.active_webview.get();
+            // Gate native WKWebView creation on the dock being visible: no
+            // hidden WebKit surfaces are created while the dock is closed. The
+            // effect re-runs when `dock_visible` flips, attaching then.
+            let dock_open = ide_ext.dock_visible.get();
             for (handle, wv) in webviews.iter() {
                 let id = webview_id_for(handle);
                 let known = html_state.borrow().contains_key(handle);
                 if !known {
+                    if !dock_open {
+                        continue;
+                    }
                     let Some(parent) = parent_window_handle(window_id) else {
                         continue;
                     };
@@ -426,7 +448,6 @@ pub fn ext_webview_panel(window_tab_data: Rc<WindowTabData>) -> impl View {
                 }
             }
             // Only the active webview is visible, and only while the dock is open.
-            let dock_open = ide_ext.dock_visible.get();
             let handles: Vec<String> =
                 html_state.borrow().keys().cloned().collect();
             for h in handles {
@@ -514,6 +535,31 @@ pub fn ext_webview_panel(window_tab_data: Rc<WindowTabData>) -> impl View {
                             eprintln!("[webview-selftest] {h} => {res}");
                         },
                     );
+                    if let Some(dir) =
+                        std::env::var_os("IDE_WEBVIEW_SNAPSHOT_DIR")
+                    {
+                        let mut file = std::path::PathBuf::from(dir);
+                        let _ = std::fs::create_dir_all(&file);
+                        let safe: String = handle
+                            .chars()
+                            .map(|c| {
+                                if c.is_alphanumeric() || c == '-' {
+                                    c
+                                } else {
+                                    '_'
+                                }
+                            })
+                            .collect();
+                        file.push(format!("{safe}.png"));
+                        let h2 = handle.clone();
+                        let f2 = file.clone();
+                        let _ = controller.snapshot(id, file, move |ok| {
+                            eprintln!(
+                                "[webview-snapshot] {h2} => {ok} {}",
+                                f2.display()
+                            );
+                        });
+                    }
                 },
             );
         });
