@@ -87,14 +87,16 @@ fn main() {
         .as_raw();
 
     let mut theme_vars = BTreeMap::new();
-    theme_vars.insert("foreground".to_string(), "#00ff88".to_string());
-    theme_vars.insert("editor-background".to_string(), "#123456".to_string());
+    theme_vars.insert("--vscode-foreground".to_string(), "#00ff88".to_string());
+    theme_vars.insert("--vscode-editor-background".to_string(), "#123456".to_string());
 
     let options = WebviewOptions {
         enable_scripts: true,
         local_resource_roots: vec![dir.clone()],
         theme_vars,
         theme_kind: ThemeKind::Dark,
+        theme_name: "Demo".to_string(),
+        theme_id: "demo".to_string(),
     };
 
     let handle = WebviewHost::create(parent, WebviewBounds::new(0.0, 0.0, 640.0, 400.0), &html, options, move |msg| {

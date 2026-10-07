@@ -1085,6 +1085,44 @@ impl PluginHostHandler {
                     },
                 )
             }
+            lapce_rpc::ide_ext::method::SHOW_INPUT_BOX => {
+                let params: lapce_rpc::ide_ext::ShowInputBoxParams =
+                    serde_json::from_value(serde_json::to_value(params)?)?;
+                let id = self.catalog_rpc.register_ide_prompt(resp);
+                self.core_rpc.ide_show_input_box(
+                    id,
+                    params.title,
+                    params.prompt,
+                    params.place_holder,
+                    params.value,
+                    params.password,
+                );
+            }
+            lapce_rpc::ide_ext::method::SHOW_QUICK_PICK => {
+                let params: lapce_rpc::ide_ext::ShowQuickPickParams =
+                    serde_json::from_value(serde_json::to_value(params)?)?;
+                let id = self.catalog_rpc.register_ide_prompt(resp);
+                self.core_rpc.ide_show_quick_pick(
+                    id,
+                    params.title,
+                    params.place_holder,
+                    params.items,
+                );
+            }
+            lapce_rpc::ide_ext::method::SHOW_MESSAGE_REQUEST => {
+                let params: lapce_rpc::ide_ext::ShowMessageRequestParams =
+                    serde_json::from_value(serde_json::to_value(params)?)?;
+                let id = self.catalog_rpc.register_ide_prompt(resp);
+                let actions =
+                    params.actions.into_iter().map(|a| a.title).collect();
+                self.core_rpc.ide_show_message_request(
+                    id,
+                    params.typ,
+                    params.message,
+                    params.modal,
+                    actions,
+                );
+            }
             _ => return Err(anyhow!("request not supported")),
         }
 

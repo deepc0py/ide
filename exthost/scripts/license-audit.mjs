@@ -39,6 +39,28 @@ const KNOWN_OVERRIDES = {
   // e.g. 'some-pkg': 'MIT',
 };
 
+// External, runtime-downloaded dependencies that are deliberately OUTSIDE this
+// npm audit because they are never bundled into our repo or binaries: we fetch
+// them at runtime (Open VSX / Docker Hub) and ship/patch nothing. They are
+// recorded here (and in NOTICE / docs/sonarqube.md) so the license posture is
+// explicit. Per the licensing decision, SonarQube Community Edition and the
+// SonarQube for IDE (SonarLint) extension are allowed ONLY as external,
+// unmodified dependencies.
+const EXTERNAL_RUNTIME_DEPENDENCIES = [
+  {
+    name: 'SonarSource.sonarlint-vscode (SonarQube for IDE)',
+    license: 'LGPL-3.0',
+    source: 'Open VSX (open-vsx.org), downloaded at runtime into the extensions dir',
+    note: 'Unmodified VS Code extension, loaded by the shared host like any other extension. Not vendored, bundled, or patched.',
+  },
+  {
+    name: 'sonarqube:community (SonarQube Community Edition server)',
+    license: 'LGPL-3.0',
+    source: 'Docker Hub, pulled at runtime; runs as an external container (ide-sonarqube)',
+    note: 'External server process, never linked into or shipped with ide.',
+  },
+];
+
 // Normalize a package.json license/licenses field into a string label.
 function readLicense(pkg) {
   if (typeof pkg.license === 'string') return pkg.license;
@@ -142,6 +164,11 @@ async function main() {
   }
   process.stdout.write('-'.repeat(nameW + 20) + '\n');
   process.stdout.write(`total: ${all.length} package(s); flagged: ${offenders.length}\n`);
+
+  process.stdout.write('\nExternal runtime-downloaded dependencies (NOT bundled; out of npm-audit scope):\n');
+  for (const d of EXTERNAL_RUNTIME_DEPENDENCIES) {
+    process.stdout.write(`  ${d.name} — ${d.license} — ${d.source}\n`);
+  }
 
   if (offenders.length) {
     process.stdout.write('\nNON-PERMISSIVE / UNKNOWN:\n');

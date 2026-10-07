@@ -389,6 +389,14 @@ pub enum ProxyNotification {
         method: String,
         params: serde_json::Value,
     },
+    /// App -> proxy: the user's reply to a server -> client UI prompt
+    /// (`window/showInputBox` / `window/showQuickPick` /
+    /// `window/showMessageRequest`). `result` is the exact reply JSON the host
+    /// expects, or JSON `null` when cancelled.
+    IdePromptResponse {
+        id: u64,
+        result: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -678,6 +686,13 @@ impl ProxyRpcHandler {
         params: serde_json::Value,
     ) {
         self.notification(ProxyNotification::ExtHostNotification { method, params });
+    }
+
+    /// Send the user's reply to a pending server -> client UI prompt back to the
+    /// proxy, which forwards it to the extension host. `result` must be the
+    /// exact reply JSON per the prompt's contract, or JSON `null` to cancel.
+    pub fn ide_prompt_response(&self, id: u64, result: serde_json::Value) {
+        self.notification(ProxyNotification::IdePromptResponse { id, result });
     }
 
     pub fn git_init(&self) {

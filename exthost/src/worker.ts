@@ -85,11 +85,28 @@ async function main(): Promise<void> {
 		try { current = JSON.parse(fs.readFileSync(settingsFile, 'utf8')); } catch { /* none */ }
 		if (value === undefined) { delete current[key]; } else { current[key] = value; }
 		fs.writeFileSync(settingsFile, JSON.stringify(current, null, 2));
-		const next = buildConfiguration(extensions, data.dataDir, session.folders);
-		session.proxy(ExtHostContext.ExtHostConfiguration).$acceptConfigurationChanged(next, { keys: [key], overrides: [] }).catch(() => { /* ignore */ });
+		pushConfiguration([key]);
 	};
 
-	installMainShim(session, { extensions, dataDir: data.dataDir, home: data.home, reconfigure });
+	// Rebuild the full configuration (user settings + per-folder SonarQube
+	// bindings for the current folder set) and push it to the ext host. Used when
+	// settings change, when the folder set changes (new window / worktree), and
+	// when the assistant updates project bindings.
+	const pushConfiguration = (changedKeys: string[]): void => {
+		const next = buildConfiguration(extensions, data.dataDir, session.folders);
+		session.proxy(ExtHostContext.ExtHostConfiguration).$acceptConfigurationChanged(next, { keys: changedKeys, overrides: [] }).catch(() => { /* ignore */ });
+	};
+
+	// Replace the per-folder project bindings (folder fsPath -> binding) and
+	// reproject them into folder-scoped `sonarlint.connectedMode.project`.
+	const setBindings = (bindings: Record<string, { projectKey: string; connectionId?: string }>): void => {
+		const file = path.join(data.dataDir, 'User', 'sonarqube-bindings.json');
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, JSON.stringify(bindings, null, 2));
+		pushConfiguration(['sonarlint.connectedMode.project']);
+	};
+
+	installMainShim(session, { extensions, dataDir: data.dataDir, home: data.home, reconfigure, setBindings });
 
 	const hostUtils: IHostUtils = {
 		_serviceBrand: undefined,
@@ -130,6 +147,10 @@ async function main(): Promise<void> {
 		} else {
 			session.proxy(ExtHostContext.ExtHostWorkspace).$acceptWorkspaceData(workspaceData);
 		}
+		// The folder set changed, so folder-scoped configuration (the per-worktree
+		// `sonarlint.connectedMode.project` binding) must be reprojected for the
+		// new folders — the initial $initializeConfiguration ran with no folders.
+		pushConfiguration(['sonarlint.connectedMode.project']);
 	};
 
 	const openWorkspace = async (id: string, folders: string[], lspSocket: string): Promise<void> => {

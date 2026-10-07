@@ -2422,6 +2422,52 @@ impl WindowTabData {
                     doc.clear_text_cache();
                 }
             }
+            CoreNotification::IdeShowInputBox {
+                id,
+                title,
+                prompt,
+                place_holder,
+                value,
+                password,
+            } => {
+                self.ide_ext.set_prompt(crate::ide_ext::IdePrompt::InputBox {
+                    id: *id,
+                    title: title.clone(),
+                    prompt: prompt.clone(),
+                    place_holder: place_holder.clone(),
+                    value: value.clone(),
+                    password: *password,
+                });
+            }
+            CoreNotification::IdeShowQuickPick {
+                id,
+                title,
+                place_holder,
+                items,
+            } => {
+                self.ide_ext.set_prompt(crate::ide_ext::IdePrompt::QuickPick {
+                    id: *id,
+                    title: title.clone(),
+                    place_holder: place_holder.clone(),
+                    items: items.clone(),
+                });
+            }
+            CoreNotification::IdeShowMessageRequest {
+                id,
+                typ,
+                message,
+                modal,
+                actions,
+            } => {
+                self.ide_ext
+                    .set_prompt(crate::ide_ext::IdePrompt::MessageRequest {
+                        id: *id,
+                        typ: *typ,
+                        message: message.clone(),
+                        modal: *modal,
+                        actions: actions.clone(),
+                    });
+            }
             _ => {}
         }
     }

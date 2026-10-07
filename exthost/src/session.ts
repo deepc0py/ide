@@ -73,6 +73,10 @@ export class Session {
 	readonly features = new Map<number, FeatureRegistration>();
 	readonly editorToUri = new Map<string, string>();
 	readonly commands = new Set<string>();
+	// Static command metadata (title/category) from every extension's
+	// `contributes.commands`, so the command palette shows a human label and the
+	// 'SonarQube' category rather than the raw command id.
+	readonly commandMeta = new Map<string, { title: string; category: string }>();
 	readonly activatedExtensions = new Set<string>();
 	readonly contextKeys = new Map<string, unknown>();
 	readonly workspaces = new Map<string, Workspace>();
@@ -87,6 +91,12 @@ export class Session {
 	// options / messages route only to the window that resolved it (each window
 	// resolves its own instance) instead of broadcasting to every window.
 	readonly webviewOwners = new Map<string, Workspace>();
+
+	// The window whose `workspace/executeCommand` is currently running. UI prompts
+	// an extension raises while handling a command (showInputBox / showQuickPick /
+	// modal showMessage) are routed back to this window so they render where the
+	// user invoked the command, instead of always the primary window.
+	activeWorkspace: Workspace | undefined = undefined;
 
 	constructor(
 		readonly rpc: RPCProtocol,
@@ -178,5 +188,23 @@ export class Session {
 		const ws = this.workspaceForUri(uri) ?? this.primary();
 		if (!ws) { return Promise.reject(new Error(`[ide-exthost] no window attached for request ${method}`)); }
 		return ws.request(method, params);
+	}
+
+	// Send a request to the window that invoked the current command (if any), else
+	// the primary window. Used for interactive UI prompts (input box / quick pick
+	// / modal message) that must render in the invoking window.
+	requestActive(method: string, params: unknown): Promise<unknown> {
+		const ws = this.activeWorkspace ?? this.primary();
+		if (!ws) { return Promise.reject(new Error(`[ide-exthost] no window attached for request ${method}`)); }
+		return ws.request(method, params);
+	}
+
+	// Contributed command entries with human title + category (falls back to the
+	// id) for the command palette.
+	commandEntries(): { id: string; title: string; category: string }[] {
+		return [...this.commands].map((id) => {
+			const meta = this.commandMeta.get(id);
+			return { id, title: meta?.title ?? id, category: meta?.category ?? '' };
+		});
 	}
 }

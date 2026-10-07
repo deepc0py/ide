@@ -22,8 +22,8 @@ use crate::{
     },
     file::PathObject,
     ide_ext::{
-        Decoration, ExtCommand, ExtView, OutputAppendParams, StatusBarItem,
-        WebviewCreate,
+        Decoration, ExtCommand, ExtView, OutputAppendParams, QuickPickItem,
+        StatusBarItem, WebviewCreate,
     },
     plugin::{PluginId, VoltInfo, VoltMetadata},
     proxy::ProxyStatus,
@@ -187,6 +187,28 @@ pub enum CoreNotification {
     IdeDecorationsSet {
         uri: lsp_types::Url,
         decorations: Vec<Decoration>,
+    },
+    // ---- shared extension host server -> client UI prompts ----
+    IdeShowInputBox {
+        id: u64,
+        title: Option<String>,
+        prompt: Option<String>,
+        place_holder: Option<String>,
+        value: Option<String>,
+        password: bool,
+    },
+    IdeShowQuickPick {
+        id: u64,
+        title: Option<String>,
+        place_holder: Option<String>,
+        items: Vec<QuickPickItem>,
+    },
+    IdeShowMessageRequest {
+        id: u64,
+        typ: u8,
+        message: String,
+        modal: bool,
+        actions: Vec<String>,
     },
 }
 
@@ -498,6 +520,58 @@ impl CoreRpcHandler {
         decorations: Vec<crate::ide_ext::Decoration>,
     ) {
         self.notification(CoreNotification::IdeDecorationsSet { uri, decorations });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn ide_show_input_box(
+        &self,
+        id: u64,
+        title: Option<String>,
+        prompt: Option<String>,
+        place_holder: Option<String>,
+        value: Option<String>,
+        password: bool,
+    ) {
+        self.notification(CoreNotification::IdeShowInputBox {
+            id,
+            title,
+            prompt,
+            place_holder,
+            value,
+            password,
+        });
+    }
+
+    pub fn ide_show_quick_pick(
+        &self,
+        id: u64,
+        title: Option<String>,
+        place_holder: Option<String>,
+        items: Vec<QuickPickItem>,
+    ) {
+        self.notification(CoreNotification::IdeShowQuickPick {
+            id,
+            title,
+            place_holder,
+            items,
+        });
+    }
+
+    pub fn ide_show_message_request(
+        &self,
+        id: u64,
+        typ: u8,
+        message: String,
+        modal: bool,
+        actions: Vec<String>,
+    ) {
+        self.notification(CoreNotification::IdeShowMessageRequest {
+            id,
+            typ,
+            message,
+            modal,
+            actions,
+        });
     }
 }
 

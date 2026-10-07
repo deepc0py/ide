@@ -1,0 +1,49 @@
+{
+  "name": "sonarqube",
+  "displayName": "SonarQube Setup Assistant",
+  "description": "In-IDE assistant to run/connect a shared local SonarQube Community server and bind SonarLint connected mode per worktree.",
+  "version": "0.1.0",
+  "publisher": "ide",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "main": "./extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "sonarqube.setupLocalServer",
+        "title": "Set Up Local Server",
+        "category": "SonarQube"
+      },
+      {
+        "command": "sonarqube.connectExisting",
+        "title": "Connect to Existing Server",
+        "category": "SonarQube"
+      },
+      {
+        "command": "sonarqube.bindWorkspace",
+        "title": "Bind Workspace",
+        "category": "SonarQube"
+      },
+      {
+        "command": "sonarqube.openDashboard",
+        "title": "Open Dashboard",
+        "category": "SonarQube"
+      },
+      {
+        "command": "sonarqube.stopLocalServer",
+        "title": "Stop Local Server",
+        "category": "SonarQube"
+      },
+      {
+        "command": "sonarqube.showStatus",
+        "title": "Show Setup Status",
+        "category": "SonarQube"
+      }
+    ]
+  }
+}

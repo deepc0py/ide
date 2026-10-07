@@ -14,8 +14,51 @@ use floem::reactive::{
 };
 use im::{HashMap, Vector};
 use lapce_rpc::ide_ext::{
-    Decoration, ExtCommand, ExtView, StatusBarItem, WebviewCreate,
+    Decoration, ExtCommand, ExtView, QuickPickItem, StatusBarItem, WebviewCreate,
 };
+
+/// An active server -> client UI prompt awaiting a user reply. The host sends
+/// these as `window/*` requests on the per-window LSP socket and blocks on the
+/// response; the app resolves one at a time via
+/// [`ProxyRpcHandler::ide_prompt_response`](lapce_rpc::proxy::ProxyRpcHandler).
+#[derive(Clone, Debug)]
+pub enum IdePrompt {
+    /// `window/showInputBox` — a single-line text entry.
+    InputBox {
+        id: u64,
+        title: Option<String>,
+        prompt: Option<String>,
+        place_holder: Option<String>,
+        value: Option<String>,
+        password: bool,
+    },
+    /// `window/showQuickPick` — a filterable single-choice list.
+    QuickPick {
+        id: u64,
+        title: Option<String>,
+        place_holder: Option<String>,
+        items: Vec<QuickPickItem>,
+    },
+    /// `window/showMessageRequest` — a message with action buttons.
+    MessageRequest {
+        id: u64,
+        typ: u8,
+        message: String,
+        modal: bool,
+        actions: Vec<String>,
+    },
+}
+
+impl IdePrompt {
+    /// The prompt's correlation id, echoed back to the proxy in the response.
+    pub fn id(&self) -> u64 {
+        match self {
+            IdePrompt::InputBox { id, .. }
+            | IdePrompt::QuickPick { id, .. }
+            | IdePrompt::MessageRequest { id, .. } => *id,
+        }
+    }
+}
 
 /// A native webview announced by the host (`ide/webview/create`).
 #[derive(Clone, Debug)]
@@ -88,6 +131,9 @@ pub struct IdeExtData {
     /// Monotonic queue of host -> webview messages.
     pub post_messages: RwSignal<Vector<WebviewMessage>>,
     next_msg_id: RwSignal<u64>,
+    /// The active server -> client UI prompt, if any. Only one prompt is shown
+    /// at a time (the host drives them sequentially).
+    pub active_prompt: RwSignal<Option<IdePrompt>>,
 }
 
 impl std::fmt::Debug for IdeExtData {
@@ -110,6 +156,7 @@ impl IdeExtData {
             decorations: cx.create_rw_signal(HashMap::new()),
             post_messages: cx.create_rw_signal(Vector::new()),
             next_msg_id: cx.create_rw_signal(0),
+            active_prompt: cx.create_rw_signal(None),
         }
     }
 
@@ -292,5 +339,16 @@ impl IdeExtData {
                 m.insert(path, Vector::from(decorations));
             }
         });
+    }
+
+    /// Show a server -> client UI prompt, replacing any currently shown one.
+    pub fn set_prompt(&self, prompt: IdePrompt) {
+        self.active_prompt.set(Some(prompt));
+    }
+
+    /// Dismiss the active prompt without sending a reply (the caller is
+    /// responsible for sending the host response).
+    pub fn clear_prompt(&self) {
+        self.active_prompt.set(None);
     }
 }

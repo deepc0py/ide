@@ -243,6 +243,11 @@ pub struct PluginCatalogRpcHandler {
     id: Arc<AtomicU64>,
     #[allow(dead_code, clippy::type_complexity)]
     pending: Arc<Mutex<HashMap<u64, Sender<Result<Value, RpcError>>>>>,
+    /// Pending server -> client UI prompts (`window/showInputBox` etc.) keyed by
+    /// a monotonic id. The `ResponseSender` replies to the extension host once
+    /// the app returns the user's choice via `IdePromptResponse`.
+    ide_prompts: Arc<Mutex<HashMap<u64, psp::ResponseSender>>>,
+    ide_prompt_id: Arc<AtomicU64>,
 }
 
 impl PluginCatalogRpcHandler {
@@ -255,6 +260,8 @@ impl PluginCatalogRpcHandler {
             plugin_rx: Arc::new(Mutex::new(Some(plugin_rx))),
             id: Arc::new(AtomicU64::new(0)),
             pending: Arc::new(Mutex::new(HashMap::new())),
+            ide_prompts: Arc::new(Mutex::new(HashMap::new())),
+            ide_prompt_id: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -264,6 +271,32 @@ impl PluginCatalogRpcHandler {
             if let Err(err) = chan.send(result) {
                 tracing::error!("{:?}", err);
             }
+        }
+    }
+
+    /// Register a pending server -> client UI prompt and return its id. The app
+    /// echoes this id back in `IdePromptResponse` to resolve `resp`.
+    pub fn register_ide_prompt(&self, resp: psp::ResponseSender) -> u64 {
+        let id = self.ide_prompt_id.fetch_add(1, Ordering::Relaxed);
+        self.ide_prompts.lock().insert(id, resp);
+        id
+    }
+
+    /// Resolve a pending UI prompt with the app's reply. `result` is the exact
+    /// reply JSON per the prompt's contract, or JSON `null` when cancelled.
+    pub fn resolve_ide_prompt(&self, id: u64, result: Value) {
+        if let Some(resp) = { self.ide_prompts.lock().remove(&id) } {
+            resp.send(result);
+        }
+    }
+
+    /// Answer every still-pending UI prompt with `null`, e.g. when the window is
+    /// shutting down, so the host-side requests don't leak.
+    pub fn cancel_ide_prompts(&self) {
+        let prompts: Vec<psp::ResponseSender> =
+            self.ide_prompts.lock().drain().map(|(_, resp)| resp).collect();
+        for resp in prompts {
+            resp.send_null();
         }
     }
 

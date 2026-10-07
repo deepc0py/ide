@@ -33,6 +33,7 @@ function parseArgs() {
     else if (k === '--limit-mb') { a.limitMb = Number(argv[++i]); }
     else if (k === '--worktrees') { a.worktrees = argv[++i].split(','); }
     else if (k === '--no-docs') { a.openDocs = false; }
+    else if (k === '--sonarlint') { a.sonarlint = true; }
   }
   return a;
 }
@@ -91,9 +92,32 @@ function pickDoc(dir) {
 
 const langOf = (f) => (f.endsWith('.ts') ? 'typescript' : f.endsWith('.js') ? 'javascript' : f.endsWith('.py') ? 'python' : f.endsWith('.rs') ? 'rust' : 'plaintext');
 
+// The SonarLint language server runs as a bundled-JRE Java process inside the
+// host tree. There must be exactly ONE for all windows (shared isolate), and —
+// unlike the external SonarQube server, which is a separate container excluded
+// from the IDE budget — this JVM IS part of the host tree and counted here.
+function summarizeSonarLint(rows) {
+  const jvms = rows.filter((r) => /java/i.test(r.cmd) && /sonarlint-ls\.jar|sonarlint/i.test(r.cmd));
+  return { count: jvms.length, totalKb: jvms.reduce((s, r) => s + r.rss, 0), rows: jvms };
+}
+
+// Generate N trivial single-file TS worktrees (each with an obvious code smell)
+// used to exercise the SonarLint language server across many windows.
+function makeSonarWorktrees(n) {
+  const dirs = [];
+  for (let i = 1; i <= n; i++) {
+    const dir = `/tmp/ide-sonarlint-wt-${i}`;
+    rmSync(dir, { recursive: true, force: true });
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, 'index.ts'), 'export function f(x: number) {\n  if (x == x) { return 1; }\n  let unused = 42;\n  return 0;\n}\n');
+    dirs.push(dir);
+  }
+  return dirs;
+}
+
 async function main() {
   const args = parseArgs();
-  const worktrees = args.worktrees ?? Array.from({ length: args.workspaces }, (_, i) => `/tmp/wt/vscode-${i + 1}`);
+  const worktrees = args.worktrees ?? (args.sonarlint ? makeSonarWorktrees(args.workspaces) : Array.from({ length: args.workspaces }, (_, i) => `/tmp/wt/vscode-${i + 1}`));
   const N = worktrees.length;
 
   const DATA = '/tmp/ide-exthost-measure-data';
@@ -179,6 +203,12 @@ async function main() {
   console.log(`\nPROCESSES ${peak.rows.length}  HOST_TREE_RSS_MB ${mb.toFixed(1)}  LIMIT_MB ${args.limitMb}`);
   if (stats) {
     console.log(`host/stats: rss=${(stats.rss / 1048576).toFixed(1)} MB  workers=${stats.workers.length}  heapUsed=[${stats.workers.map((w) => (w.heapUsed / 1048576).toFixed(0)).join(', ')}] MB`);
+  }
+
+  const sl = summarizeSonarLint(peak.rows);
+  console.log(`SONARLINT_JVM processes=${sl.count}  rss=${(sl.totalKb / 1024).toFixed(1)} MB  (expected: one shared JVM for all ${N} windows)`);
+  for (const r of sl.rows) {
+    console.log(`  jvm ${String(r.pid).padStart(7)}  ${(r.rss / 1024).toFixed(1)} MB  ${r.cmd.slice(0, 90)}`);
   }
 
   for (const { lsp } of lsps) { lsp.close(); }

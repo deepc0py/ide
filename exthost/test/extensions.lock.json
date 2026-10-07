@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-10-06T20:34:27.555Z",
+  "generatedAt": "2026-10-07T03:27:54.370Z",
   "openVsx": "https://open-vsx.org",
   "targetPlatform": "darwin-arm64",
   "extensions": {
@@ -56,6 +56,15 @@
       "version": "2.1.292",
       "download": "https://open-vsx.org/api/Anthropic/claude-code/darwin-arm64/2.1.292/file/Anthropic.claude-code-2.1.292@darwin-arm64.vsix",
       "sha256": "ec78aa4d93c5a620eda2c70029b0c6f25935a0b669e4c04c535d7d1a23fe354f"
+    },
+    "sonarsource.sonarlint-vscode": {
+      "id": "sonarsource.sonarlint-vscode",
+      "namespace": "SonarSource",
+      "name": "sonarlint-vscode",
+      "target": "darwin-arm64",
+      "version": "6.0.1",
+      "download": "https://open-vsx.org/api/SonarSource/sonarlint-vscode/darwin-arm64/6.0.1/file/SonarSource.sonarlint-vscode-6.0.1@darwin-arm64.vsix",
+      "sha256": "f6804c28152973612e5d79de6a1f83f949e0fe8de6735202d6799af53dffd679"
     }
   }
 }

@@ -37,6 +37,7 @@ export const EXTENSION_IDS = [
   'ms-python.python',
   'rust-lang.rust-analyzer',
   'anthropic.claude-code',
+  'sonarsource.sonarlint-vscode',
 ];
 
 // Source descriptors. `target: 'darwin-arm64'` means we prefer the Apple-Silicon
@@ -52,6 +53,10 @@ const SOURCES = [
   { id: 'rust-lang.rust-analyzer', namespace: 'rust-lang', name: 'rust-analyzer', target: 'darwin-arm64' },
   // claude-code has a darwin-arm64 target build.
   { id: 'anthropic.claude-code', namespace: 'Anthropic', name: 'claude-code', target: 'darwin-arm64' },
+  // SonarQube for IDE (SonarLint). Bundles its own JRE + the SonarLint
+  // language server in the platform build; we pin the darwin-arm64 build.
+  // External, unmodified, runtime-downloaded dependency (LGPL-3.0) — see NOTICE.
+  { id: 'sonarsource.sonarlint-vscode', namespace: 'SonarSource', name: 'sonarlint-vscode', target: 'darwin-arm64' },
 ];
 
 function srcFor(id) {

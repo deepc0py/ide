@@ -128,6 +128,35 @@ the attached `exthost` server by name
 (`PluginCatalog::handle_exthost_request`). `ide/webview/onMessage` goes through
 `ProxyNotification::ExtHostNotification`.
 
+### Interactive UI prompts (host → window requests)
+
+Extensions that call `window.showInputBox`, `window.showQuickPick` or a modal
+`window.showInformationMessage(…, {modal:true}, …)` (the SonarQube setup
+assistant does) need a human answer. The host sends these as **server→client LSP
+requests** on the per-window socket and awaits the reply:
+
+| method | params | reply (or `null` on cancel) |
+| --- | --- | --- |
+| `window/showInputBox` | `{title?, prompt?, placeHolder?, value?, password?}` | `{value}` |
+| `window/showQuickPick` | `{title?, placeHolder?, items:[{label, description?, detail?, handle}]}` | `{handle}` |
+| `window/showMessageRequest` | `{type, message, modal?, detail?, actions:[{title}]}` | `{title}` |
+
+Host side (`exthost/`): `MainThreadQuickOpen.$input`/`$show`+`$setItems` and the
+modal path of `MainThreadMessageService.$showMessage` route through
+`Session.requestActive`, which targets the window whose `workspace/executeCommand`
+is currently running (`Session.activeWorkspace`, set around `executeCommand` in
+`lsp.ts`) so the prompt renders where the user invoked the command. Native side:
+`psp.rs::process_request` parses these three methods, registers the pending
+`ResponseSender` in `PluginCatalogRpcHandler`, and emits a `CoreNotification::Ide*`
+prompt; the app (`lapce-app/src/ide_prompt.rs`) renders a floem overlay (input
+box with optional masking, filterable quick pick, modal dialog with buttons) and
+replies via `ProxyNotification::IdePromptResponse { id, result }`, which resolves
+the host request. Esc / backdrop (non-modal) cancels with `null`; pending prompts
+are drained to `null` on window close so host requests never leak. Contributed
+command **titles + categories** come from each extension's
+`contributes.commands` (`Session.commandMeta`), so the palette shows e.g.
+*SonarQube: Set Up Local Server* rather than the raw command id.
+
 ### Extension webview dock (hidden by default)
 
 `ide_ext.dock_visible` gates the dock; it is **false by default**, so creating /
@@ -137,6 +166,44 @@ user reveals it via (a) the *Toggle Extension Webview* workbench/palette command
 item whose extension registered a webview view (`webview_for_status_item` maps a
 "Claude Code" click to Claude's view). `set_html`/visibility reconcile against
 `dock_visible`.
+
+### Webview theming (styled like VS Code)
+
+A webview's HTML is prepared by `ide-webview` (`shim::prepare_html`) before it
+reaches the `WKWebView`. To render extension React UIs styled instead of raw
+white/serif HTML, it injects the three things VS Code's webview harness provides
+(`vs/workbench/contrib/webview/browser/{themeing.ts,pre/index.html}`):
+1. the **default stylesheet** (`@layer vscode-default`, so extension CSS wins) —
+   body/links/`code`/scrollbars from the theme vars; adapted so the page paints
+   `--vscode-editor-background` and `<button>` gets `appearance: none` (WebKit
+   otherwise draws a light native control for transparent-background buttons
+   that Chromium — VS Code's engine — renders themed);
+2. the **full `--vscode-*` variable set** under `:root` — every registered color
+   + size resolved for the active theme plus the fonts, from the generated
+   `ide-webview/src/theme_data.rs` (see `tools/gen_theme_vars.mjs`), mirroring
+   `WebviewThemeDataProvider`;
+3. the **theme body class + data attributes** (`vscode-dark`/`vscode-light`,
+   `data-vscode-theme-kind`/`-name`/`-id`).
+
+`webview_view.rs::webview_theme_options` builds the variable map from the active
+theme: the kind is derived from the editor background/foreground (NOT
+`color.color_preference`, whose inverted `is_light` reads `Light` for Dark
+Modern), and the host's editor font is threaded in. Regression test:
+`ide-webview/tests/claude_webview.rs` (Claude's resources all resolve; every
+`--vscode-*` the Claude CSS references is themed, bar the set VS Code's Dark
+Modern also leaves undefined).
+
+### openExternal (login flows)
+
+An extension that opens a URL — `vscode.env.openExternal(uri)` →
+`MainThreadWindow.$openUri`, or `executeCommand('vscode.open', uri)` /
+`'vscode.env.openExternal'` → `MainThreadCommands.$executeCommand` — is routed
+through `exthost/src/openExternal.ts`, which spawns the OS default-browser opener
+(`open`, overridable with `IDE_OPENER`) detached, logs `[ide] openExternal
+<url>`, and returns without completing anything. E.g. clicking Claude's
+*Claude.ai Subscription* posts to the extension, whose login flow then requests
+the external URL open. Tests (`exthost/test/openExternal.test.mjs`) stub the
+opener and assert the URL is requested + logged.
 
 ### Per-window webview parenting
 
@@ -306,6 +373,32 @@ the display is 2560pt). Observed:
   window-list `win-B.png` capture shows the dock region blank (GPU surface not
   composited by `screencapture`).
 
+## Smoke5 (webview theming — styled dark UIs)
+
+Run `/tmp/ide-smoke5` with a git+TS fixture, `IDE_WEBVIEW_SELFTEST=1`,
+`IDE_WEBVIEW_SNAPSHOT_DIR=/tmp/ide-smoke5/shots`, default theme (Dark Modern).
+`WKWebView takeSnapshot` PNGs in `/tmp/ide-smoke5/`:
+
+- **`claude-code.png`** — Claude Code's sidebar webview, now **dark-themed**:
+  `--vscode-editor-background` (#1f1f1f) page, `--vscode-editor-foreground`
+  (#cccccc) text, the VS Code UI font (sans-serif), a bordered *"Welcome to
+  Claude Code"* header, and the three login option buttons
+  (*Claude.ai Subscription*, *Anthropic Console*, *Bedrock, Foundry, or Vertex*)
+  rendered as VS Code Dark Modern secondary buttons — transparent fill, light
+  border + label. Before the fix (Smoke4 `webview-B.png`) this was raw white
+  serif HTML with default buttons: the extension CSS loaded but no theme vars /
+  default stylesheet were injected.
+- **`gitlens.png`** — a GitLens webview (Create Cloud Patch) fully styled: dark
+  panel, dark inputs with a blue focus border, the primary *Create Cloud Patch*
+  button in VS Code blue (`--vscode-button-background` #0078d4), blue links, and
+  checkboxes — proving GitLens webviews pick up the injected theme too.
+
+The selftest DOM probe confirms live content
+(`Claude Code can be used with your Claude subscription … Claude.ai Subscription
+…`). The all-resources-resolve + full-variable-coverage guarantees are covered
+by `ide-webview/tests/claude_webview.rs`; the `openExternal` login path by
+`exthost/test/openExternal.test.mjs`.
+
 ## Known gaps
 
 - **`ide/output/append` is not emitted by the host** — see `ide/DEFERRED.md`.
@@ -317,3 +410,8 @@ the display is 2560pt). Observed:
   shows **⊗ 2** + squiggles). The publish→`main_split.diagnostics`→counter path
   needs only a document open in the window; it was previously read before ESLint
   had published.
+- *(fixed)* **Unstyled webviews** — Claude/GitLens webviews rendered as raw
+  white/serif HTML because no theme vars or default stylesheet were injected and
+  the theme kind was mis-derived. Now the full VS Code `--vscode-*` set + default
+  stylesheet + body classes are injected from the active theme — see *Webview
+  theming* above and Smoke5.

@@ -11,6 +11,7 @@ import type { Session } from './session.js';
 import type { ScannedExtension } from './scanner.js';
 import { markerToLspDiagnostic, workspaceEditToLsp } from './convert.js';
 import { globToRegExp } from './glob.js';
+import { openExternal } from './openExternal.js';
 import type { UriComponents } from './vs.js';
 import type { IMarkerData, IDocumentFilterDto, IWorkspaceEditDto } from '../.vscode-src/src/vs/workbench/api/common/extHost.protocol.js';
 
@@ -19,6 +20,9 @@ export interface ShimDeps {
 	dataDir: string;
 	home: string;
 	reconfigure(key: string, value: unknown): void;
+	// Replace the per-folder SonarQube project bindings and reproject them into
+	// folder-scoped `sonarlint.connectedMode.project`. Keyed by folder fsPath.
+	setBindings(bindings: Record<string, { projectKey: string; connectionId?: string }>): void;
 }
 
 type Actor = Record<string, (...args: never[]) => unknown>;
@@ -87,6 +91,23 @@ export function installMainShim(session: Session, deps: ShimDeps): MainShim {
 	const extById = new Map<string, ScannedExtension>();
 	for (const e of deps.extensions) { extById.set(e.description.identifier.value.toLowerCase(), e); }
 
+	// Index contributed command titles/categories so the palette shows a human
+	// label + category (e.g. 'SonarQube: Set Up Local Server') instead of the raw
+	// command id. Commands are activated/registered at runtime; this static map is
+	// their display metadata.
+	for (const e of deps.extensions) {
+		const contributed = (e.description.contributes as { commands?: unknown } | undefined)?.commands;
+		const list = Array.isArray(contributed) ? contributed : contributed ? [contributed] : [];
+		for (const c of list) {
+			const cmd = c as { command?: string; title?: unknown; category?: unknown };
+			if (!cmd.command) { continue; }
+			session.commandMeta.set(cmd.command, {
+				title: toPlainText(cmd.title) ?? cmd.command,
+				category: toPlainText(cmd.category) ?? '',
+			});
+		}
+	}
+
 	const activateByEvent = (event: string): void => {
 		session.proxy(ExtHostContext.ExtHostExtensionService).$activateByEvent(event, 0).catch((err: unknown) => log(`activateByEvent ${event} failed: ${String(err)}`));
 	};
@@ -105,6 +126,35 @@ export function installMainShim(session: Session, deps: ShimDeps): MainShim {
 	const writeJson = (file: string, data: unknown): void => {
 		fs.mkdirSync(path.dirname(file), { recursive: true });
 		fs.writeFileSync(file, JSON.stringify(data));
+	};
+
+	// Write/remove a secret in an extension's SecretStorage namespace and notify
+	// the ext host so the owning extension's onDidChangeSecret fires. Shared by
+	// MainThreadSecretState and the `ide.secretState.*` bridge commands (which let
+	// the SonarQube assistant store the SonarLint token under SonarLint's id).
+	//
+	// The namespace is ExtensionIdentifier.toKey(id) — i.e. LOWERCASED — because
+	// that is exactly how VS Code's ExtHostSecretState keys every extension's
+	// `context.secrets`. The bridge receives the canonical, mixed-case marketplace
+	// id (e.g. `SonarSource.sonarlint-vscode`), so it must normalize or the target
+	// extension's `secrets.get(...)` (which looks under the lowercased id) returns
+	// nothing — the bug that left SonarLint connected-mode without its token.
+	const secretNamespace = (extensionId: string): string => extensionId.toLowerCase();
+	const setSecret = (extensionId: string, key: string, value: string): void => {
+		const ns = secretNamespace(extensionId);
+		const store = readJson(secretsFile);
+		(store[ns] ??= {})[key] = value;
+		writeJson(secretsFile, store);
+		session.proxy(ExtHostContext.ExtHostSecretState).$onDidChangePassword({ extensionId: ns, key }).catch(() => { /* ignore */ });
+	};
+	const deleteSecret = (extensionId: string, key: string): void => {
+		const ns = secretNamespace(extensionId);
+		const store = readJson(secretsFile);
+		if (store[ns]) {
+			delete store[ns][key];
+			writeJson(secretsFile, store);
+			session.proxy(ExtHostContext.ExtHostSecretState).$onDidChangePassword({ extensionId: ns, key }).catch(() => { /* ignore */ });
+		}
 	};
 
 	// -- webview html staging --
@@ -147,6 +197,12 @@ export function installMainShim(session: Session, deps: ShimDeps): MainShim {
 		else { session.broadcast(method, params); }
 	};
 
+	// Pending quick-pick sessions. ExtHostQuickOpen.showQuickPick calls $show
+	// (whose returned promise resolves to the picked item handle) and then, once
+	// items are ready, $setItems. We defer $show's resolution until $setItems has
+	// rendered the picker in the invoking window and the user has chosen.
+	const quickPickSessions = new Map<number, { resolve: (handle: number | undefined) => void; title?: string; placeHolder?: string }>();
+
 	const impls: Partial<Record<string, Actor>> = {
 		MainThreadExtensionService: {
 			$onDidActivateExtension(id: { value: string }) { session.activatedExtensions.add(id.value); log(`activated ${id.value}`); },
@@ -185,11 +241,11 @@ export function installMainShim(session: Session, deps: ShimDeps): MainShim {
 		MainThreadCommands: {
 			$registerCommand(id: string) {
 				session.commands.add(id);
-				session.broadcast('ide/commands/changed', { commands: [...session.commands].map((c) => ({ id: c, title: c, category: '' })) });
+				session.broadcast('ide/commands/changed', { commands: session.commandEntries() });
 			},
 			$unregisterCommand(id: string) {
 				session.commands.delete(id);
-				session.broadcast('ide/commands/changed', { commands: [...session.commands].map((c) => ({ id: c, title: c, category: '' })) });
+				session.broadcast('ide/commands/changed', { commands: session.commandEntries() });
 			},
 			$fireCommandActivationEvent(id: string) { activateByEvent(`onCommand:${id}`); },
 			async $executeCommand(id: string, args: unknown[] | SerializableObjectWithBuffers<unknown[]>) {
@@ -200,6 +256,30 @@ export function installMainShim(session: Session, deps: ShimDeps): MainShim {
 				// Built-in commands the workbench would normally provide.
 				if (id === 'setContext' || id === '_setContext') { session.contextKeys.set(String(realArgs[0]), realArgs[1]); return undefined; }
 				if (id === 'vscode.executeDocumentSymbolProvider') { return []; }
+				if (id === 'vscode.open' || id === 'vscode.env.openExternal') {
+					const target = realArgs[0];
+					const uriString = typeof target === 'string' ? target : URI.revive(target as UriComponents).toString(true);
+					openExternal(uriString, log);
+					return undefined;
+				}
+				// Host-provided bridge commands for the built-in SonarQube assistant.
+				// `ide.secretState.*` let it write a secret into ANOTHER extension's
+				// SecretStorage namespace (the SonarLint token, keyed by server URL,
+				// so SonarLint's language server can read it) — keeping tokens out of
+				// settings. `ide.sonarqube.setBindings` applies per-folder project
+				// bindings. These are not registered as palette commands.
+				if (id === 'ide.secretState.store') {
+					setSecret(String(realArgs[0]), String(realArgs[1]), String(realArgs[2]));
+					return undefined;
+				}
+				if (id === 'ide.secretState.delete') {
+					deleteSecret(String(realArgs[0]), String(realArgs[1]));
+					return undefined;
+				}
+				if (id === 'ide.sonarqube.setBindings') {
+					deps.setBindings((realArgs[0] ?? {}) as Record<string, { projectKey: string; connectionId?: string }>);
+					return undefined;
+				}
 				log(`unimplemented builtin command: ${id}`);
 				return undefined;
 			},
@@ -306,19 +386,68 @@ export function installMainShim(session: Session, deps: ShimDeps): MainShim {
 			},
 		},
 		MainThreadMessageService: {
-			async $showMessage(severity: number, message: string, _options: unknown, commands: { title: string; handle: number }[]) {
+			async $showMessage(severity: number, message: string, options: { modal?: boolean; detail?: string }, commands: { title: string; handle: number }[]) {
 				const type = severity >= 3 ? 1 : severity === 2 ? 2 : 3;
-				if (commands.length > 0) {
-					const picked = await session.request('window/showMessageRequest', { type, message, actions: commands.map((c) => ({ title: c.title })) });
-					if (picked && typeof picked === 'object' && 'title' in picked) {
-						const title = picked.title;
-						const match = commands.find((c) => c.title === title);
+				const modal = !!options?.modal;
+				// A modal, or any message with action buttons, is a request: render
+				// it in the invoking window and wait for the chosen action.
+				if (modal || commands.length > 0) {
+					const picked = await session.requestActive('window/showMessageRequest', {
+						type, message, modal, detail: options?.detail,
+						actions: commands.map((c) => ({ title: c.title })),
+					});
+					if (picked && typeof picked === 'object' && 'title' in picked && typeof picked.title === 'string') {
+						const chosenTitle = picked.title;
+						const match = commands.find((c) => c.title === chosenTitle);
 						return match?.handle;
 					}
 					return undefined;
 				}
 				session.broadcast('window/showMessage', { type, message });
 				return undefined;
+			},
+		},
+		MainThreadQuickOpen: {
+			// showInputBox: render a single-line input (optionally masked) in the
+			// invoking window and return the typed string, or undefined on cancel.
+			async $input(options: { title?: string; prompt?: string; placeHolder?: string; value?: string; password?: boolean } | undefined, _validateInput: boolean) {
+				const res = await session.requestActive('window/showInputBox', {
+					title: options?.title,
+					prompt: options?.prompt,
+					placeHolder: options?.placeHolder,
+					value: options?.value,
+					password: !!options?.password,
+				});
+				if (res && typeof res === 'object' && 'value' in res && typeof res.value === 'string') { return res.value; }
+				return undefined;
+			},
+			// showQuickPick: $show returns a promise that stays pending until the
+			// user picks; $setItems (called once items are ready) actually renders
+			// the picker and resolves it with the chosen item handle.
+			async $show(instance: number, options: { title?: string; placeHolder?: string } | undefined) {
+				const { promise, resolve } = Promise.withResolvers<number | undefined>();
+				quickPickSessions.set(instance, { resolve, title: options?.title, placeHolder: options?.placeHolder });
+				return promise;
+			},
+			async $setItems(instance: number, items: { label?: string; description?: string; detail?: string; handle?: number; type?: string }[]) {
+				const session_ = quickPickSessions.get(instance);
+				if (!session_) { return; }
+				const picks = items
+					.filter((i) => i.type !== 'separator' && typeof i.handle === 'number')
+					.map((i) => ({ label: i.label ?? '', description: i.description, detail: i.detail, handle: i.handle }));
+				const chosen = await session.requestActive('window/showQuickPick', { title: session_.title, placeHolder: session_.placeHolder, items: picks });
+				quickPickSessions.delete(instance);
+				if (chosen && typeof chosen === 'object' && 'handle' in chosen && typeof chosen.handle === 'number') {
+					session_.resolve(chosen.handle);
+				} else {
+					session_.resolve(undefined);
+				}
+			},
+			async $setError() { /* validation errors are not surfaced in the native picker */ },
+			async $createOrUpdate() { /* the QuickPick/InputBox object API is not bridged; only showQuickPick/showInputBox */ },
+			async $dispose(instance: number) {
+				const session_ = quickPickSessions.get(instance);
+				if (session_) { quickPickSessions.delete(instance); session_.resolve(undefined); }
 			},
 		},
 		MainThreadStatusBar: {
@@ -363,18 +492,10 @@ export function installMainShim(session: Session, deps: ShimDeps): MainShim {
 			$registerExtensionStorageKeysToSync() { /* noop */ },
 		},
 		MainThreadSecretState: {
-			async $getPassword(extensionId: string, key: string) { return readJson(secretsFile)[extensionId]?.[key]; },
-			async $setPassword(extensionId: string, key: string, value: string) {
-				const store = readJson(secretsFile);
-				(store[extensionId] ??= {})[key] = value;
-				writeJson(secretsFile, store);
-				session.proxy(ExtHostContext.ExtHostSecretState).$onDidChangePassword({ extensionId, key }).catch(() => { /* ignore */ });
-			},
-			async $deletePassword(extensionId: string, key: string) {
-				const store = readJson(secretsFile);
-				if (store[extensionId]) { delete store[extensionId][key]; writeJson(secretsFile, store); }
-			},
-			async $getKeys(extensionId: string) { return Object.keys(readJson(secretsFile)[extensionId] ?? {}); },
+			async $getPassword(extensionId: string, key: string) { return readJson(secretsFile)[secretNamespace(extensionId)]?.[key]; },
+			async $setPassword(extensionId: string, key: string, value: string) { setSecret(extensionId, key, value); },
+			async $deletePassword(extensionId: string, key: string) { deleteSecret(extensionId, key); },
+			async $getKeys(extensionId: string) { return Object.keys(readJson(secretsFile)[secretNamespace(extensionId)] ?? {}); },
 		},
 		MainThreadAuthentication: {
 			async $registerAuthenticationProvider() { /* noop */ },
@@ -387,7 +508,7 @@ export function installMainShim(session: Session, deps: ShimDeps): MainShim {
 		},
 		MainThreadWindow: {
 			async $getInitialState() { return { isFocused: true, isActive: true }; },
-			async $openUri() { return true; },
+			async $openUri(uri: UriComponents) { return openExternal(URI.revive(uri).toString(true), log); },
 			async $asExternalUri(uri: UriComponents) { return uri; },
 		},
 		MainThreadLanguageModelTools: {

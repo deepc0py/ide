@@ -12,6 +12,12 @@ cargo build --release
 ./target/release/ide /path/to/worktree   # opens a new window in the running instance
 ```
 
+## SonarQube integration
+
+One shared SonarQube Community Edition server and SonarLint language server for all windows, with an in-IDE setup
+assistant (command palette, category *SonarQube*) and connected-mode analysis. Run **SonarQube: Set Up Local Server**
+(needs Docker) or **SonarQube: Connect to Existing Server** to get started. See `docs/sonarqube.md`.
+
 ## Benchmark
 
 ```sh

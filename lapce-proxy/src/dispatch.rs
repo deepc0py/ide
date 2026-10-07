@@ -199,6 +199,7 @@ impl ProxyHandler for Dispatcher {
                         crate::exthost::close_workspace(&id);
                     }
                 }
+                self.catalog_rpc.cancel_ide_prompts();
                 self.catalog_rpc.shutdown();
                 for (_, sender) in self.terminals.iter() {
                     sender.send(Msg::Shutdown);
@@ -459,6 +460,9 @@ impl ProxyHandler for Dispatcher {
             }
             ExtHostNotification { method, params } => {
                 self.catalog_rpc.exthost_notification(method, params);
+            }
+            IdePromptResponse { id, result } => {
+                self.catalog_rpc.resolve_ide_prompt(id, result);
             }
         }
     }

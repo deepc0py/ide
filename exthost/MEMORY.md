@@ -147,3 +147,26 @@ comfortably under budget. If a future workload opened 8 *distinct* heavy Rust
 projects (no shared dep sources) and the user actively navigated all of them,
 rust-analyzer would grow toward the eager figure; `cachePriming` keeps idle windows
 cheap regardless.
+
+## SonarQube / SonarLint (optional, opt-in)
+
+The SonarQube **server** is an external Docker container (`ide-sonarqube`,
+`sonarqube:community`) — a separate process, **not** part of the host tree or the
+2 GB IDE budget. The **SonarLint language server**, however, runs as a bundled-JRE
+Java process *inside* the host tree, and — like every other language server in the
+shared isolate — there is exactly **one** for all windows, not one per window.
+
+Measured (Apple Silicon, 8 windows, the standalone measurement below):
+
+```
+cd exthost && node scripts/measure.mjs --sonarlint --workspaces 8 --settle 45 --limit-mb 100000
+→ SONARLINT_JVM processes=1  rss≈1321 MB   (one shared JVM for all 8 windows)
+  host tree ≈2557 MB = node host ≈385 MB + shared SonarLint JVM ≈1321 MB + per-window isolate heaps
+```
+
+The invariant is **processes=1** (one shared JVM). The absolute RSS is dominated by
+the JVM's default heap sizing and is only incurred when SonarLint is installed and
+activated; the six-extension default workload above does not include it. SonarLint
+is a diagnostics-only extension and is deliberately **not** in
+`LANGUAGE_SERVER_EXTENSIONS` (it provides no go-to-definition), so it never
+suppresses a built-in server.

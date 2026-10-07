@@ -82,6 +82,38 @@ function defaultsModel(): IConfigurationModel {
 	return rawToModel(raw);
 }
 
+// Per-folder SonarQube project bindings, written by the built-in assistant
+// (via the `ide.sonarqube.setBindings` host command). Keyed by folder fsPath;
+// projected into folder-scoped `sonarlint.connectedMode.project` so SonarLint
+// binds each worktree. Stored outside settings.json because it is resource
+// (folder) scoped and derived state, not user preferences.
+export interface FolderBinding {
+	projectKey: string;
+	connectionId?: string;
+}
+
+export function bindingsFile(dataDir: string): string {
+	return join(dataDir, 'User', 'sonarqube-bindings.json');
+}
+
+export function readFolderBindings(dataDir: string): Record<string, FolderBinding> {
+	try {
+		const parsed: unknown = JSON.parse(readFileSync(bindingsFile(dataDir), 'utf8'));
+		return parsed && typeof parsed === 'object' ? (parsed as Record<string, FolderBinding>) : {};
+	} catch {
+		return {};
+	}
+}
+
+// Folder-scoped configuration model: the SonarQube project binding for a folder,
+// or empty when the folder is not bound.
+function folderModel(binding: FolderBinding | undefined): IConfigurationModel {
+	if (!binding?.projectKey) { return emptyModel(); }
+	const project: Record<string, string> = { projectKey: binding.projectKey };
+	if (binding.connectionId) { project.connectionId = binding.connectionId; }
+	return rawToModel({ 'sonarlint.connectedMode.project': project });
+}
+
 function configurationScopes(): [string, number | undefined][] {
 	const registry = Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration);
 	const properties = registry.getConfigurationProperties();
@@ -105,6 +137,7 @@ export function buildConfiguration(extensions: ScannedExtension[], dataDir: stri
 		// no user settings file -> empty user model
 	}
 	const userModel = userParser.configurationModel;
+	const bindings = readFolderBindings(dataDir);
 	return {
 		defaults: defaultsModel(),
 		policy: emptyModel(),
@@ -112,7 +145,7 @@ export function buildConfiguration(extensions: ScannedExtension[], dataDir: stri
 		userLocal: { contents: userModel.contents, keys: userModel.keys, overrides: userModel.overrides },
 		userRemote: emptyModel(),
 		workspace: emptyModel(),
-		folders: folders.map((f) => [URI.file(f), emptyModel()]),
+		folders: folders.map((f) => [URI.file(f), folderModel(bindings[f])]),
 		configurationScopes: configurationScopes(),
 	};
 }

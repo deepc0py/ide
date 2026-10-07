@@ -39,9 +39,33 @@ function discoverExtensionDirs(): string[] {
 	let entries: fs.Dirent[] = [];
 	try { entries = fs.readdirSync(extensionsDir, { withFileTypes: true }); } catch { return out; }
 	for (const ent of entries) {
-		if (!ent.isDirectory()) { continue; }
+		// Accept symlinked extension dirs too: `ent.isDirectory()` is false for a
+		// symlink-to-dir, so gate on the package.json existing (which follows the
+		// link) rather than on the dirent type.
+		if (!ent.isDirectory() && !ent.isSymbolicLink()) { continue; }
 		const dir = path.join(extensionsDir, ent.name);
 		if (fs.existsSync(path.join(dir, 'package.json'))) { out.push(dir); }
+	}
+	return out;
+}
+
+// Built-in extensions we ship with the host (OUR code, MIT), e.g. the SonarQube
+// setup assistant. They live under `builtin/` next to the host sources (dev /
+// repo) or next to host.js (packaged); each immediate child with a package.json
+// is an extension. Loaded in addition to the user's installed extensions.
+function discoverBuiltinDirs(): string[] {
+	const out: string[] = [];
+	const roots = [path.join(appRoot, 'builtin'), path.join(here, 'builtin')];
+	const seen = new Set<string>();
+	for (const root of roots) {
+		let entries: fs.Dirent[] = [];
+		try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { continue; }
+		for (const ent of entries) {
+			if (!ent.isDirectory() && !ent.isSymbolicLink()) { continue; }
+			const dir = path.join(root, ent.name);
+			if (seen.has(ent.name)) { continue; }
+			if (fs.existsSync(path.join(dir, 'package.json'))) { out.push(dir); seen.add(ent.name); }
+		}
 	}
 	return out;
 }
@@ -89,7 +113,7 @@ let counter = 0;
 
 function ensureWorker(): Promise<void> {
 	if (booted) { return booted; }
-	const extensionDirs = discoverExtensionDirs();
+	const extensionDirs = [...discoverExtensionDirs(), ...discoverBuiltinDirs()];
 	const w = new Worker(workerPath, {
 		workerData: { dataDir, logsDir: path.join(dataDir, 'logs'), home, appRoot, version, extensionDirs },
 	});

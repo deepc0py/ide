@@ -47,6 +47,8 @@ pub struct Handle {
     enable_scripts: bool,
     theme_vars: BTreeMap<String, String>,
     theme_kind: ThemeKind,
+    theme_name: String,
+    theme_id: String,
     /// Latest JSON state reported by `setState`, re-injected across `set_html`.
     state: Rc<RefCell<Option<String>>>,
 }
@@ -72,6 +74,8 @@ impl WebviewHost {
                 enable_scripts: options.enable_scripts,
                 theme_vars: options.theme_vars.clone(),
                 theme_kind: options.theme_kind,
+                theme_name: options.theme_name.clone(),
+                theme_id: options.theme_id.clone(),
                 initial_state: None,
             },
         );
@@ -110,6 +114,8 @@ impl WebviewHost {
             enable_scripts: options.enable_scripts,
             theme_vars: options.theme_vars,
             theme_kind: options.theme_kind,
+            theme_name: options.theme_name,
+            theme_id: options.theme_id,
             state,
         })
     }
@@ -125,6 +131,8 @@ impl Handle {
                 enable_scripts: self.enable_scripts,
                 theme_vars: self.theme_vars.clone(),
                 theme_kind: self.theme_kind,
+                theme_name: self.theme_name.clone(),
+                theme_id: self.theme_id.clone(),
                 initial_state: self.state.borrow().clone(),
             },
         );

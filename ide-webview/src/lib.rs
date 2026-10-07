@@ -14,6 +14,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 pub mod shim;
+pub mod theme;
+mod theme_data;
 pub mod uri;
 
 pub use shim::ThemeKind;
@@ -58,10 +60,16 @@ pub struct WebviewOptions {
     /// Absolute directories the webview may load resources from. A resource URL
     /// resolving outside all of these is rejected (403).
     pub local_resource_roots: Vec<PathBuf>,
-    /// `--vscode-*` theme variables (name without the leading `--`).
+    /// Webview CSS custom properties keyed by the *full* property name
+    /// (including the leading `--`); build with
+    /// [`theme::webview_theme_vars`].
     pub theme_vars: BTreeMap<String, String>,
-    /// The theme kind, surfaced as the `<body>` class.
+    /// The theme kind, surfaced as the `<body>` class and `data-vscode-theme-kind`.
     pub theme_kind: ThemeKind,
+    /// Human-readable theme label (`data-vscode-theme-name`).
+    pub theme_name: String,
+    /// Theme settings id (`data-vscode-theme-id`).
+    pub theme_id: String,
 }
 
 impl Default for WebviewOptions {
@@ -71,6 +79,8 @@ impl Default for WebviewOptions {
             local_resource_roots: Vec::new(),
             theme_vars: BTreeMap::new(),
             theme_kind: ThemeKind::default(),
+            theme_name: String::new(),
+            theme_id: String::new(),
         }
     }
 }

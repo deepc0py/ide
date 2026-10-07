@@ -33,6 +33,12 @@ pub mod method {
     pub const WEBVIEW_RESOLVE_VIEW: &str = "ide/webview/resolveView";
     pub const COMMANDS_LIST: &str = "ide/commands/list";
     pub const EXECUTE_COMMAND: &str = "workspace/executeCommand";
+
+    // Server -> client UI prompt requests (host awaits a reply). These use the
+    // standard `window/*` method names rather than the `ide/*` namespace.
+    pub const SHOW_INPUT_BOX: &str = "window/showInputBox";
+    pub const SHOW_QUICK_PICK: &str = "window/showQuickPick";
+    pub const SHOW_MESSAGE_REQUEST: &str = "window/showMessageRequest";
 }
 
 /// A status-bar contribution (`ide/statusBar/set`).
@@ -212,4 +218,62 @@ pub struct ExecuteCommandParams {
     pub command: String,
     #[serde(default)]
     pub arguments: Vec<serde_json::Value>,
+}
+
+/// Params of the server -> client `window/showInputBox` request. Field names
+/// mirror the host's camelCase JSON.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ShowInputBoxParams {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default, rename = "placeHolder")]
+    pub place_holder: Option<String>,
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub password: bool,
+}
+
+/// A single choice in a `window/showQuickPick` request. `handle` is an opaque
+/// number minted by the host; the reply echoes the chosen item's `handle`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuickPickItem {
+    pub label: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub detail: Option<String>,
+    pub handle: u64,
+}
+
+/// Params of the server -> client `window/showQuickPick` request.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ShowQuickPickParams {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default, rename = "placeHolder")]
+    pub place_holder: Option<String>,
+    #[serde(default)]
+    pub items: Vec<QuickPickItem>,
+}
+
+/// A single action button in a `window/showMessageRequest` request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessageRequestAction {
+    pub title: String,
+}
+
+/// Params of the server -> client `window/showMessageRequest` request. `type`
+/// is `1 = error`, `2 = warning`, `3 = info`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ShowMessageRequestParams {
+    #[serde(rename = "type")]
+    pub typ: u8,
+    pub message: String,
+    #[serde(default)]
+    pub modal: bool,
+    #[serde(default)]
+    pub actions: Vec<MessageRequestAction>,
 }

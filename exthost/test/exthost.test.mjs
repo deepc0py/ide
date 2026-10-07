@@ -38,12 +38,21 @@ before(async () => {
 	// vsix extraction loses the executable bit on the rust-analyzer server binary.
 	for (const dir of Object.values(extMap)) { chmodRustAnalyzer(dir); }
 
-	// A dedicated extensions dir whose immediate children are the 6 extensions.
-	const extensionsDir = path.dirname(Object.values(extMap)[0]);
-
 	rmSync(DATA_DIR, { recursive: true, force: true });
 	mkdirSync(path.join(DATA_DIR, 'User'), { recursive: true });
 	mkdirSync(HOME_DIR, { recursive: true });
+
+	// A dedicated extensions dir whose immediate children are the 6 extensions
+	// this suite exercises. SonarLint is intentionally excluded here: it is a
+	// supported extension (see extensions.lock.json) but boots a heavy Java
+	// language server, which the dedicated connected-mode test (sonarqube.e2e)
+	// exercises instead — keeping this fast suite deterministic.
+	const extensionsDir = path.join(DATA_DIR, 'extensions');
+	mkdirSync(extensionsDir, { recursive: true });
+	for (const [id, dir] of Object.entries(extMap)) {
+		if (id === 'sonarsource.sonarlint-vscode') { continue; }
+		symlinkSync(dir, path.join(extensionsDir, path.basename(dir)), 'dir');
+	}
 	// Memory-lever + Jedi settings are now shipped product defaults (see
 	// exthost/src/config.ts PRODUCT_DEFAULT_SETTINGS); this test relies on them
 	// instead of re-specifying them, so it exercises the real default config.

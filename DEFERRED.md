@@ -41,9 +41,30 @@ actor"; implemented behaviourally where a required feature needs it, otherwise a
 fallback that logs `UNIMPLEMENTED main-thread call: <Actor>.<method>` once and
 resolves `undefined`. Deferred actor areas (no UI / not required by the six
 extensions): Terminal (real pty), Debug, Task running, Testing, SCM, Comments,
-Notebooks, Timeline, Quick Open / Dialogs, EditorInsets, CustomEditors,
-Chat*/LanguageModels (chat UI + model providers), Decorations (file-explorer
-badges). These are observable in the worker log and are safe no-ops.
+Notebooks, Timeline, EditorInsets, CustomEditors, Chat*/LanguageModels (chat UI +
+model providers), Decorations (file-explorer badges). These are observable in the
+worker log and are safe no-ops.
+
+## Quick Open / Dialogs — implemented for the SonarQube assistant (partial)
+
+`MainThreadQuickOpen` and the modal path of `MainThreadMessageService` are now
+implemented behaviourally (the SonarQube setup assistant needs them): the host
+sends `window/showInputBox`, `window/showQuickPick` and modal
+`window/showMessageRequest` as server→client requests on the per-window LSP socket,
+and the native IDE renders them as floem overlays (input box with optional
+password masking, filterable quick pick, modal message dialog with action
+buttons) and replies with the chosen value / handle / title (or null on cancel).
+See `docs/exthost-integration.md`. Still deferred within this area:
+
+- **Live input validation** — `InputBoxOptions.validateInput` is not called as the
+  user types (the native input has no incremental validation round-trip); the
+  extension's final value is returned and validated after submit.
+- **The imperative `QuickPick`/`InputBox` object API** (`createQuickPick` /
+  `createInputBox`, `$createOrUpdate`) and `showWorkspaceFolderPick` — only the
+  one-shot `showQuickPick` / `showInputBox` / `showMessage` flows are bridged.
+- **Native OS modal** — VS Code (Electron) shows `showMessageRequest(modal)` as a
+  native OS dialog; the native IDE renders an in-app floem modal overlay instead
+  (Esc cancels; the backdrop does not dismiss a modal).
 
 ## Feature caveats
 

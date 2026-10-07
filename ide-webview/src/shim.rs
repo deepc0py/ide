@@ -48,11 +48,17 @@ pub struct HtmlPrep {
     /// Whether the extension's scripts (and therefore our shim) run. When
     /// `false` we only rewrite resource URLs and inject theme CSS.
     pub enable_scripts: bool,
-    /// `--vscode-*` theme variables, without the leading `--`. e.g.
-    /// `"editor-background" -> "#1e1e1e"`.
+    /// Webview CSS custom properties, keyed by the *full* property name
+    /// (including the leading `--`), e.g. `"--vscode-editor-background" ->
+    /// "#1f1f1f"`, `"--text-link-decoration" -> "none"`. Built by
+    /// [`crate::theme::webview_theme_vars`].
     pub theme_vars: BTreeMap<String, String>,
-    /// The theme kind, used for the `<body>` class.
+    /// The theme kind, used for the `<body>` class and `data-vscode-theme-kind`.
     pub theme_kind: ThemeKind,
+    /// Human-readable theme label (`data-vscode-theme-name`).
+    pub theme_name: String,
+    /// Theme settings id (`data-vscode-theme-id`).
+    pub theme_id: String,
     /// JSON-encoded initial state restored into `getState()` for this load.
     pub initial_state: Option<String>,
 }
@@ -93,10 +99,16 @@ const SHIM_TEMPLATE: &str = r#"(function(){
     writable: false
   });
   var bodyClass = "__IDE_BODY_CLASS__";
+  var themeName = "__IDE_THEME_NAME__";
+  var themeId = "__IDE_THEME_ID__";
   function applyBodyClass() {
-    if (!document.body || !bodyClass) { return; }
-    bodyClass.split(' ').forEach(function (c) { if (c) { document.body.classList.add(c); } });
-    document.body.setAttribute('data-vscode-theme-kind', bodyClass.split(' ')[0]);
+    if (!document.body) { return; }
+    if (bodyClass) {
+      bodyClass.split(' ').forEach(function (c) { if (c) { document.body.classList.add(c); } });
+      document.body.setAttribute('data-vscode-theme-kind', bodyClass.split(' ')[0]);
+    }
+    document.body.setAttribute('data-vscode-theme-name', themeName);
+    document.body.setAttribute('data-vscode-theme-id', themeId);
   }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', applyBodyClass);
@@ -105,33 +117,84 @@ const SHIM_TEMPLATE: &str = r#"(function(){
   }
 })();"#;
 
-/// Build the `<script>`/`<style>` block injected at the top of `<head>`.
+/// VS Code's webview default stylesheet
+/// (`vs/workbench/contrib/webview/browser/pre/index.html`), wrapped in the
+/// low-priority `@layer vscode-default` so an extension's own CSS always wins.
+/// Adapted for the native `WKWebView`: the page itself paints the editor
+/// background (in VS Code the workbench paints behind a transparent body; here
+/// there is no workbench behind the surface, so without this the view is white),
+/// and `<button>` gets `appearance: none` so WebKit honors the themed background
+/// like Chromium (VS Code's engine) does instead of drawing a light native
+/// control for buttons whose extension CSS leaves the background transparent.
+const DEFAULT_STYLES: &str = r#"@layer vscode-default {
+  html { background-color: var(--vscode-editor-background); scrollbar-color: var(--vscode-scrollbarSlider-background) var(--vscode-editor-background); }
+  body { overscroll-behavior-x: none; background-color: transparent; color: var(--vscode-editor-foreground); font-family: var(--vscode-font-family); font-weight: var(--vscode-font-weight); font-size: var(--vscode-font-size); margin: 0; padding: 0 20px; }
+  button { -webkit-appearance: none; appearance: none; background-color: transparent; color: inherit; font: inherit; }
+  img, video { max-width: 100%; max-height: 100%; }
+  a, a code { color: var(--vscode-textLink-foreground); }
+  p > a { text-decoration: var(--text-link-decoration); }
+  a:hover { color: var(--vscode-textLink-activeForeground); }
+  a:focus, input:focus, select:focus, textarea:focus { outline: 1px solid -webkit-focus-ring-color; outline-offset: -1px; }
+  code { font-family: var(--monaco-monospace-font); color: var(--vscode-textPreformat-foreground); background-color: var(--vscode-textPreformat-background); padding: 1px 3px; border-radius: 4px; }
+  pre code { padding: 0; }
+  blockquote { background: var(--vscode-textBlockQuote-background); border-color: var(--vscode-textBlockQuote-border); }
+  kbd { background-color: var(--vscode-keybindingLabel-background); color: var(--vscode-keybindingLabel-foreground); border-style: solid; border-width: 1px; border-radius: 3px; border-color: var(--vscode-keybindingLabel-border); border-bottom-color: var(--vscode-keybindingLabel-bottomBorder); box-shadow: inset 0 -1px 0 var(--vscode-widget-shadow); vertical-align: middle; padding: 1px 3px; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-corner { background-color: var(--vscode-editor-background); }
+  ::-webkit-scrollbar-thumb { background-color: var(--vscode-scrollbarSlider-background); }
+  ::-webkit-scrollbar-thumb:hover { background-color: var(--vscode-scrollbarSlider-hoverBackground); }
+  ::-webkit-scrollbar-thumb:active { background-color: var(--vscode-scrollbarSlider-activeBackground); }
+}"#;
+
+/// Escape a string for use inside a double-quoted JS string literal.
+fn js_string(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| match c {
+            '\\' => vec!['\\', '\\'],
+            '"' => vec!['\\', '"'],
+            '\n' => vec!['\\', 'n'],
+            '\r' => vec!['\\', 'r'],
+            '<' | '>' => vec![],
+            _ => vec![c],
+        })
+        .collect()
+}
+
+/// Build the `<style>`/`<script>` block injected at the top of `<head>`:
+/// the default stylesheet, the `:root` theme variables, then (if scripts are
+/// enabled) the `acquireVsCodeApi` shim that also applies the theme body class
+/// and `data-vscode-theme-*` attributes.
 fn injection_block(prep: &HtmlPrep) -> String {
     let mut block = String::new();
 
-    if prep.enable_scripts {
-        let initial_state = prep.initial_state.as_deref().unwrap_or("undefined");
-        let script = SHIM_TEMPLATE
-            .replace("__IDE_INITIAL_STATE__", initial_state)
-            .replace("__IDE_BODY_CLASS__", prep.theme_kind.body_class());
-        block.push_str("<script>");
-        block.push_str(&script);
-        block.push_str("</script>");
-    }
+    // 1. Default webview stylesheet (low-priority layer).
+    block.push_str("<style id=\"_defaultStyles\">");
+    block.push_str(DEFAULT_STYLES);
+    block.push_str("</style>");
 
-    // Theme CSS variables (and a sensible default color/background) under :root.
+    // 2. Theme CSS variables under :root (full property names).
     block.push_str("<style id=\"_ide_vscode_theme\">:root{");
     for (name, value) in &prep.theme_vars {
-        // Values are CSS tokens (colors / sizes); strip anything that could
-        // break out of the declaration.
         let safe = sanitize_css_value(value);
-        block.push_str("--vscode-");
         block.push_str(&sanitize_css_name(name));
         block.push(':');
         block.push_str(&safe);
         block.push(';');
     }
     block.push_str("}</style>");
+
+    // 3. The acquireVsCodeApi shim + body class / data attributes.
+    if prep.enable_scripts {
+        let initial_state = prep.initial_state.as_deref().unwrap_or("undefined");
+        let script = SHIM_TEMPLATE
+            .replace("__IDE_INITIAL_STATE__", initial_state)
+            .replace("__IDE_BODY_CLASS__", prep.theme_kind.body_class())
+            .replace("__IDE_THEME_NAME__", &js_string(&prep.theme_name))
+            .replace("__IDE_THEME_ID__", &js_string(&prep.theme_id));
+        block.push_str("<script>");
+        block.push_str(&script);
+        block.push_str("</script>");
+    }
 
     block
 }
@@ -209,8 +272,8 @@ mod tests {
 
     fn vars() -> BTreeMap<String, String> {
         let mut m = BTreeMap::new();
-        m.insert("editor-background".to_string(), "#1e1e1e".to_string());
-        m.insert("foreground".to_string(), "#cccccc".to_string());
+        m.insert("--vscode-editor-background".to_string(), "#1e1e1e".to_string());
+        m.insert("--vscode-foreground".to_string(), "#cccccc".to_string());
         m
     }
 
@@ -220,6 +283,8 @@ mod tests {
             enable_scripts: true,
             theme_vars: vars(),
             theme_kind: ThemeKind::Dark,
+            theme_name: "Dark Modern".to_string(),
+            theme_id: "Default Dark Modern".to_string(),
             initial_state: None,
         };
         let html = "<html><head><title>x</title></head><body></body></html>";
@@ -231,11 +296,18 @@ mod tests {
         let title_at = out.find("<title>").unwrap();
         assert!(shim_at < title_at, "shim must be injected before page content");
 
-        // Theme variables present.
+        // Default stylesheet injected (low-priority layer) and before page head.
+        assert!(out.contains("@layer vscode-default"));
+        assert!(out.contains("id=\"_defaultStyles\""));
+        assert!(out.find("_defaultStyles").unwrap() < title_at);
+
+        // Theme variables present (full property names, not prefixed again).
         assert!(out.contains("--vscode-editor-background:#1e1e1e;"));
         assert!(out.contains("--vscode-foreground:#cccccc;"));
-        // Body class wired through the shim.
+        // Body class + theme id/name wired through the shim.
         assert!(out.contains("vscode-dark"));
+        assert!(out.contains("data-vscode-theme-kind"));
+        assert!(out.contains("Default Dark Modern"));
         // Default undefined initial state.
         assert!(out.contains("var state = undefined;"));
     }
@@ -246,21 +318,22 @@ mod tests {
             enable_scripts: false,
             theme_vars: vars(),
             theme_kind: ThemeKind::Light,
-            initial_state: None,
+            ..HtmlPrep::default()
         };
         let html = "<html><head></head><body></body></html>";
         let out = prepare_html(html, &prep);
         assert!(!out.contains("acquireVsCodeApi"));
+        // Theme + default stylesheet still injected without scripts.
         assert!(out.contains("--vscode-editor-background:#1e1e1e;"));
+        assert!(out.contains("@layer vscode-default"));
     }
 
     #[test]
     fn embeds_initial_state_json() {
         let prep = HtmlPrep {
             enable_scripts: true,
-            theme_vars: BTreeMap::new(),
-            theme_kind: ThemeKind::Dark,
             initial_state: Some(r#"{"count":3}"#.to_string()),
+            ..HtmlPrep::default()
         };
         let out = prepare_html("<head></head>", &prep);
         assert!(out.contains(r#"var state = {"count":3};"#));
@@ -270,9 +343,7 @@ mod tests {
     fn rewrites_resource_urls_during_prepare() {
         let prep = HtmlPrep {
             enable_scripts: false,
-            theme_vars: BTreeMap::new(),
-            theme_kind: ThemeKind::Dark,
-            initial_state: None,
+            ..HtmlPrep::default()
         };
         let html = r#"<head><link href="https://file+.vscode-resource.vscode-cdn.net/Users/a/x.css"></head>"#;
         let out = prepare_html(html, &prep);
@@ -284,23 +355,21 @@ mod tests {
     fn handles_fragment_without_head() {
         let prep = HtmlPrep {
             enable_scripts: true,
-            theme_vars: BTreeMap::new(),
-            theme_kind: ThemeKind::Dark,
-            initial_state: None,
+            ..HtmlPrep::default()
         };
         let out = prepare_html("<div>hi</div>", &prep);
-        // Injected at the very start.
-        assert!(out.starts_with("<script>"));
+        // The injected block (default stylesheet first) is prepended.
+        assert!(out.starts_with("<style id=\"_defaultStyles\">"));
         assert!(out.contains("<div>hi</div>"));
+        // The shim still precedes the page fragment.
+        assert!(out.find("acquireVsCodeApi").unwrap() < out.find("<div>hi</div>").unwrap());
     }
 
     #[test]
     fn inserts_before_body_when_no_head() {
         let prep = HtmlPrep {
             enable_scripts: true,
-            theme_vars: BTreeMap::new(),
-            theme_kind: ThemeKind::Dark,
-            initial_state: None,
+            ..HtmlPrep::default()
         };
         let out = prepare_html("<html><body><p>x</p></body></html>", &prep);
         let inject = out.find("<script>").unwrap();
@@ -312,14 +381,13 @@ mod tests {
     fn sanitizes_css_value_injection() {
         let mut m = BTreeMap::new();
         m.insert(
-            "evil".to_string(),
+            "--vscode-evil".to_string(),
             "red;} body{display:none".to_string(),
         );
         let prep = HtmlPrep {
             enable_scripts: false,
             theme_vars: m,
-            theme_kind: ThemeKind::Dark,
-            initial_state: None,
+            ..HtmlPrep::default()
         };
         let out = prepare_html("<head></head>", &prep);
         assert!(!out.contains("body{display:none"));

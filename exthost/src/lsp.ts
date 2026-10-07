@@ -103,7 +103,10 @@ export class LspConnection {
 		this.socket.write(payload);
 	}
 
-	private reply(id: number | string, result: unknown): void { this.send({ id, result }); }
+	// JSON-RPC success responses MUST carry a `result`; coerce `undefined` (e.g. a
+	// command handler that returns nothing) to `null` so the field is present and
+	// the client recognises the reply instead of waiting forever.
+	private reply(id: number | string, result: unknown): void { this.send({ id, result: result ?? null }); }
 	private replyError(id: number | string, message: string): void { this.send({ id, error: { code: -32603, message } }); }
 
 	// ---- outbound (server -> client) ----------------------------------------
@@ -175,7 +178,7 @@ export class LspConnection {
 			case 'textDocument/rename': return this.rename(params);
 			case 'textDocument/codeAction': return this.codeAction(params);
 			case 'workspace/executeCommand': return this.executeCommand(params);
-			case 'ide/commands/list': return { commands: [...this.session.commands].map((c) => ({ id: c, title: c, category: '' })) };
+			case 'ide/commands/list': return { commands: this.session.commandEntries() };
 			case 'ide/host/activated': return { activated: [...this.session.activatedExtensions] };
 			case 'ide/webview/resolveView': return this.resolveView(params);
 			default:
@@ -400,7 +403,15 @@ export class LspConnection {
 
 	private async executeCommand(params: unknown): Promise<unknown> {
 		const p = params as { command: string; arguments?: unknown[] };
-		return this.session.proxy(ExtHostContext.ExtHostCommands).$executeContributedCommand(p.command, ...(p.arguments ?? []));
+		// Mark this window active so UI prompts the command raises (input box /
+		// quick pick / modal message) render here, not in the primary window.
+		const prev = this.session.activeWorkspace;
+		this.session.activeWorkspace = this.workspace;
+		try {
+			return await this.session.proxy(ExtHostContext.ExtHostCommands).$executeContributedCommand(p.command, ...(p.arguments ?? []));
+		} finally {
+			this.session.activeWorkspace = prev;
+		}
 	}
 
 	// ---- custom ide/* -------------------------------------------------------

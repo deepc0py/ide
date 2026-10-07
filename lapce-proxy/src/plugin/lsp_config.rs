@@ -333,11 +333,36 @@ fn program_on_path(program: &str) -> bool {
 /// `initializationOptions` for typescript-language-server. Since v3 it no longer
 /// bundles TypeScript, so it must be told where a classic `tsserver` install
 /// lives; point it at a managed TypeScript 5.x `lib` directory.
+///
+/// We also cap tsserver's heap via `maxTsServerMemory` (→ tsserver's
+/// `--max-old-space-size`). This bounds the transient spike a tsserver makes
+/// while indexing — important when many windows each run their own server. NOTE
+/// it is not graceful: a project whose full type graph exceeds the cap makes
+/// tsserver OOM-*exit* (and ts-ls then stops it, no restart) rather than
+/// degrade. The VS Code monorepo's `src/` project needs ~4.5 GB for full
+/// semantics, so on it tsserver exits under any practical cap; the cap still
+/// matters because it holds the pre-exit spike to ~1 GB/server instead of
+/// ~4.5 GB, keeping 8 simultaneous indexers from thrashing the whole machine.
+/// (`tsserver.useSyntaxServer="always"` would avoid the full-project load, but
+/// typescript-language-server 6.x's option parser only accepts `never`/`auto`
+/// and silently maps `always`→`auto`, so it cannot be forced from here.)
 fn typescript_init_options() -> Option<serde_json::Value> {
     let lib = ensure_tsserver_lib()?;
     Some(serde_json::json!({
-        "tsserver": { "path": lib.to_string_lossy() }
+        "tsserver": { "path": lib.to_string_lossy() },
+        "maxTsServerMemory": max_tsserver_memory_mb(),
     }))
+}
+
+/// Per-window tsserver heap cap in MB. Overridable via `IDE_TS_MAX_MEMORY_MB`
+/// (bench tuning); defaults to 1024 MB, enough for normal projects while
+/// preventing an unbounded monorepo tsserver from exhausting memory.
+fn max_tsserver_memory_mb() -> u64 {
+    std::env::var("IDE_TS_MAX_MEMORY_MB")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(1024)
 }
 
 /// Locate a classic `tsserver.js` `lib` directory, installing a managed

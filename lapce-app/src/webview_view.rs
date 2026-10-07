@@ -23,7 +23,9 @@ use parking_lot::Mutex;
 
 use floem::View;
 use floem::peniko::kurbo::{Point, Rect};
-use floem::reactive::{SignalGet, SignalWith, create_effect};
+use floem::reactive::{
+    RwSignal, Scope, SignalGet, SignalUpdate, SignalWith, create_effect,
+};
 use floem::views::{Decorators, container, dyn_container, empty, label, stack};
 use floem::IntoView;
 use floem::window::WindowId;
@@ -34,12 +36,40 @@ pub use ide_webview::{
     Handle, ThemeKind, WebviewBounds, WebviewError, WebviewHost, WebviewOptions,
 };
 
+use crate::config::LapceConfig;
 use crate::config::color::LapceColor;
 use crate::window_tab::WindowTabData;
 
 /// Identifies a hosted webview; mirrors the handle used by the `ide/webview/*`
 /// protocol.
 pub type WebviewId = u64;
+
+thread_local! {
+    /// The single window currently allowed to host a *live* extension webview.
+    /// Extension webviews (Claude sidebar, GitLens views, …) each cost a WebKit
+    /// `WebContent` process (~130 MB); keeping one live per window makes N
+    /// windows cost N processes. We instead keep the WebContent only for the
+    /// active window and dispose the rest, re-attaching (with full theme
+    /// fidelity) when a window becomes active — i.e. "suspend hidden webviews".
+    /// Updated on window focus (`register_focused_window`) and on each window's
+    /// panel init (so the most-recently-opened window is active even headless,
+    /// where focus events may not fire). A reactive signal so each window's
+    /// reconcile effect re-runs when the active window changes.
+    static ACTIVE_WV_WINDOW: RwSignal<Option<WindowId>> =
+        Scope::new().create_rw_signal(None);
+}
+
+fn active_webview_window() -> RwSignal<Option<WindowId>> {
+    ACTIVE_WV_WINDOW.with(|s| *s)
+}
+
+/// Mark `window_id` as the window allowed to host a live extension webview.
+fn set_active_webview_window(window_id: WindowId) {
+    let sig = active_webview_window();
+    if sig.get_untracked() != Some(window_id) {
+        sig.set(Some(window_id));
+    }
+}
 
 /// Tracked geometry of a webview's placeholder in window-logical coordinates.
 /// `origin` comes from floem's move listener (absolute window position) and
@@ -234,6 +264,51 @@ fn webview_id_for(handle: &str) -> WebviewId {
     hasher.finish()
 }
 
+/// Map the host's active color theme onto the VS Code webview theme contract:
+/// the theme kind (for the `vscode-dark`/`vscode-light` body class), the full
+/// `--vscode-*` variable map (colors + sizes + fonts, from the active theme with
+/// VS Code defaults for anything it does not set), and the theme label/id used
+/// for the `data-vscode-theme-*` attributes.
+fn webview_theme_options(
+    config: &LapceConfig,
+) -> (ThemeKind, std::collections::BTreeMap<String, String>, String) {
+    // Derive the kind from the actual editor colors rather than
+    // `color.color_preference`: that field is computed from an inverted
+    // `is_light` check (fg brighter than bg) and reads `Light` for a dark theme
+    // like Dark Modern, which would give the webview a white body. A theme is
+    // dark when its editor background is darker than its foreground.
+    let bg = config.color(LapceColor::EDITOR_BACKGROUND).to_rgba8();
+    let fg = config.color(LapceColor::EDITOR_FOREGROUND).to_rgba8();
+    let dark = (bg.r as u32 + bg.g as u32 + bg.b as u32)
+        < (fg.r as u32 + fg.g as u32 + fg.b as u32);
+    let high_contrast = config.color_theme.high_contrast.unwrap_or(false);
+    let kind = match (dark, high_contrast) {
+        (true, true) => ThemeKind::HighContrast,
+        (true, false) => ThemeKind::Dark,
+        (false, true) => ThemeKind::HighContrastLight,
+        (false, false) => ThemeKind::Light,
+    };
+    // The editor font is the monospace font in an IDE; the UI font stays the
+    // platform default (VS Code `--vscode-font-family`).
+    let editor_font = if config.editor.font_family.trim().is_empty() {
+        ide_webview::theme::DEFAULT_MONOSPACE_FONT.to_string()
+    } else {
+        config.editor.font_family.clone()
+    };
+    let vars = ide_webview::theme::webview_theme_vars_with(
+        kind,
+        &editor_font,
+        &editor_font,
+        config.editor.font_size() as u32,
+    );
+    let name = if config.color_theme.name.is_empty() {
+        "Dark Modern".to_string()
+    } else {
+        config.color_theme.name.clone()
+    };
+    (kind, vars, name)
+}
+
 /// Maps each floem [`WindowId`] to its AppKit `NSWindow` pointer. Populated when
 /// a window gains focus (at which point the OS key window *is* that floem
 /// window), so webviews can be parented to the window that actually owns them
@@ -255,6 +330,8 @@ pub fn register_focused_window(window_id: WindowId) {
     use objc2_app_kit::NSApplication;
 
     register_window_ordinal(window_id);
+    // A focused window becomes the one allowed to host a live extension webview.
+    set_active_webview_window(window_id);
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
@@ -353,6 +430,10 @@ pub fn ext_webview_panel(window_tab_data: Rc<WindowTabData>) -> impl View {
     let config = window_tab_data.common.config;
 
     let window_id = window_tab_data.common.window_common.window_id;
+    // The most-recently-opened window becomes the active webview host. Focus
+    // events keep this current; this init assignment makes it deterministic even
+    // when no focus event fires (headless), so exactly one window stays live.
+    set_active_webview_window(window_id);
     let controller = WebviewController::new();
     let html_state: Rc<RefCell<HashMap<String, String>>> =
         Rc::new(RefCell::new(HashMap::new()));
@@ -393,21 +474,38 @@ pub fn ext_webview_panel(window_tab_data: Rc<WindowTabData>) -> impl View {
             // hidden WebKit surfaces are created while the dock is closed. The
             // effect re-runs when `dock_visible` flips, attaching then.
             let dock_open = ide_ext.dock_visible.get();
+            // Only the active *window* hosts a live webview; others suspend their
+            // WebContent. Subscribing here re-runs the effect on focus/open so the
+            // newly-active window attaches and the previously-active disposes.
+            let window_active =
+                active_webview_window().get() == Some(window_id);
             for (handle, wv) in webviews.iter() {
                 let id = webview_id_for(handle);
                 let known = html_state.borrow().contains_key(handle);
-                if !known {
-                    if !dock_open {
-                        continue;
-                    }
+                // Only the *active* view needs a live WKWebView. Extensions
+                // register many webview views (Claude: sidebar + secondary +
+                // sessions; GitLens: graph, commit/patch details, welcome); the
+                // dock shows one at a time, so attaching all of them would hold
+                // one WebContent process per view (7+ per window). Keep a single
+                // live WKWebView (the active one, while the dock is open) and
+                // dispose the rest — switching views re-attaches lazily and the
+                // shim persists `getState` across the reload.
+                let want_live = window_active
+                    && dock_open
+                    && active.as_deref() == Some(handle.as_str());
+                if want_live && !known {
                     let Some(parent) = parent_window_handle(window_id) else {
                         continue;
                     };
+                    let (theme_kind, theme_vars, theme_name) =
+                        webview_theme_options(&config.get_untracked());
                     let options = WebviewOptions {
                         enable_scripts: wv.enable_scripts,
                         local_resource_roots: wv.local_resource_roots.clone(),
-                        theme_vars: Default::default(),
-                        theme_kind: ThemeKind::Dark,
+                        theme_vars,
+                        theme_kind,
+                        theme_name: theme_name.clone(),
+                        theme_id: theme_name,
                     };
                     let proxy2 = proxy.clone();
                     let h = handle.clone();
@@ -424,7 +522,7 @@ pub fn ext_webview_panel(window_tab_data: Rc<WindowTabData>) -> impl View {
                         }
                         Err(e) => tracing::error!("attach webview failed: {e}"),
                     }
-                } else {
+                } else if want_live {
                     let changed = html_state
                         .borrow()
                         .get(handle)
@@ -436,6 +534,10 @@ pub fn ext_webview_panel(window_tab_data: Rc<WindowTabData>) -> impl View {
                             .borrow_mut()
                             .insert(handle.clone(), wv.html.clone());
                     }
+                } else if known {
+                    // Inactive (or dock closed): drop its WebContent process.
+                    controller.dispose(id);
+                    html_state.borrow_mut().remove(handle);
                 }
             }
             // Dispose webviews the host removed.
@@ -457,6 +559,41 @@ pub fn ext_webview_panel(window_tab_data: Rc<WindowTabData>) -> impl View {
                 );
             }
         });
+    }
+
+    // Startup auto-open (opt-in via IDE_OPEN_VIEW=<viewId>): reveal the dock with
+    // the named extension view as soon as the host resolves it, e.g.
+    // `IDE_OPEN_VIEW=claudeVSCodeSidebar` shows the Claude Code sidebar on
+    // startup. Unlike IDE_WEBVIEW_SELFTEST this skips the DOM probe/snapshot, so
+    // it is a cheap, documented way (used by bench/membench.py) to start a window
+    // with an extension webview active. Resolved-view handles look like
+    // `view:<viewId>:<ws>:<ts>:<n>`, so the id is the handle's second segment.
+    if let Some(want) = std::env::var_os("IDE_OPEN_VIEW") {
+        let want = want.to_string_lossy().into_owned();
+        if !want.is_empty() {
+            let ide_ext = ide_ext.clone();
+            create_effect(move |_| {
+                let target = ide_ext.webviews.with(|m| {
+                    m.iter()
+                        .find(|(handle, wv)| {
+                            wv.view_type == want
+                                || handle.split(':').nth(1) == Some(want.as_str())
+                        })
+                        .map(|(handle, _)| handle.clone())
+                });
+                if let Some(handle) = target {
+                    // Only force the dock when this view isn't already the active
+                    // one (get_untracked so a user manually closing the dock later
+                    // isn't overridden until the webview set changes).
+                    let already = ide_ext.dock_visible.get_untracked()
+                        && ide_ext.active_webview.get_untracked().as_deref()
+                            == Some(handle.as_str());
+                    if !already {
+                        ide_ext.show_dock(Some(handle));
+                    }
+                }
+            });
+        }
     }
 
     // Drain host -> webview messages.

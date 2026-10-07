@@ -86,6 +86,7 @@ use crate::{
     },
     editor_tab::{EditorTabChild, EditorTabData},
     focus_text::focus_text,
+    ide_prompt::ide_prompt_view,
     id::{EditorTabId, SplitId},
     keymap::keymap_view,
     keypress::keymap::KeyMap,
@@ -3429,6 +3430,7 @@ fn window_tab(window_tab_data: Rc<WindowTabData>) -> impl View {
         palette(window_tab_data.clone()),
         about::about_popup(window_tab_data.clone()),
         alert::alert_box(window_tab_data.alert_data.clone()),
+        ide_prompt_view(window_tab_data.clone()),
     ))
     .on_cleanup(move || {
         window_tab_scope.dispose();

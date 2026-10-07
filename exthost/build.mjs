@@ -2,7 +2,7 @@
 //  - dist/host.js    : control-socket server + worker manager (entry point)
 //  - dist/worker.js  : per-workspace worker (VS Code ExtensionHostMain + main-thread shim + LSP bridge)
 import { build } from 'esbuild';
-import { existsSync } from 'node:fs';
+import { existsSync, cpSync, rmSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -90,5 +90,16 @@ const targets = [
 
 for (const t of targets) {
 	await build({ ...common, entryPoints: [t.in], outfile: t.out });
+}
+
+// Ship the built-in extensions (OUR MIT code, e.g. the SonarQube assistant)
+// next to host.js so a packaged host (host.js not under the repo) still finds
+// them via `<host.js dir>/builtin/*`. In the repo they are also found via
+// `<appRoot>/builtin`.
+const builtinSrc = resolve(root, 'builtin');
+if (existsSync(builtinSrc)) {
+	const builtinDest = resolve(root, 'dist/builtin');
+	rmSync(builtinDest, { recursive: true, force: true });
+	cpSync(builtinSrc, builtinDest, { recursive: true });
 }
 console.log('build complete');

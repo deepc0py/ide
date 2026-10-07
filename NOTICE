@@ -16,3 +16,13 @@ Bundled TextMate grammars (lapce-core/grammars/) are from VS Code's built-in
 language extensions: JSON and CSS grammars are MIT (Copyright (c) Microsoft
 Corporation); the INI grammar is from textmate/ini.tmbundle under its permissive
 TextMate Bundle license.
+
+SonarQube integration — external, runtime-downloaded dependencies (NOT bundled):
+ide can run and connect to a shared SonarQube Community Edition server and uses
+the "SonarQube for IDE" (SonarLint) VS Code extension (SonarSource.sonarlint-vscode)
+for connected-mode analysis. Both are LGPL-3.0 and are used ONLY as external,
+unmodified dependencies: the SonarQube server image (sonarqube:community) is
+pulled from Docker Hub and runs as a separate container; the extension is
+downloaded at runtime from Open VSX into the extensions directory and loaded like
+any other extension. Neither is vendored into this repository, bundled into the
+ide binaries, or patched. See docs/sonarqube.md and exthost/scripts/license-audit.mjs.
