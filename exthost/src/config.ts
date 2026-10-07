@@ -61,6 +61,12 @@ export const PRODUCT_DEFAULT_SETTINGS: Readonly<Record<string, unknown>> = {
 	// Use the bundled, lightweight Jedi language server for Python instead of a
 	// heavyweight server (Pylance is proprietary and unavailable anyway).
 	'python.languageServer': 'Jedi',
+	// SonarQube for IDE's language server is a JVM shared by every window; its
+	// default heap sizing lets it grow past 1.3 GB. Cap it (user-overridable).
+	'sonarlint.ls.vmargs': '-Xmx512m -XX:+UseSerialGC -XX:MaxMetaspaceSize=192m',
+	// Its JS/TS analyzer runs in a separate Node "bridge" whose default heap
+	// ceiling is 4 GB; cap it too.
+	'sonarlint.analyzerProperties': { 'sonar.javascript.node.maxspace': '512' },
 };
 
 function defaultsModel(): IConfigurationModel {

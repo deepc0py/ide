@@ -114,3 +114,17 @@ done
 python3 bench/membench.py --include-webkit --measure-only \
   --match 'mbench/idebench' --settle 120 --samples 4
 ```
+
+## With SonarQube for IDE (connected mode, optional)
+
+`node exthost/scripts/measure.mjs --sonarlint --workspaces 8` (host tree only; the SonarQube server runs in its own
+external container and is excluded):
+
+| Config | SonarLint JVM | Sonar JS/TS bridge | node host | host tree |
+|---|---|---|---|---|
+| SonarLint defaults | 1321 MB | — | — | 2557 MB |
+| shipped caps (`sonarlint.ls.vmargs=-Xmx512m…`, `sonar.javascript.node.maxspace=512`) | 596 MB | 779 MB | 406 MB | 1838 MB |
+
+With the IDE process (~300 MB for 8 windows), enabling SonarQube for IDE pushes the total to roughly 2.1 GB. That is
+about 100 MB over the 2 GB target. The bridge's RSS isn't V8 heap, so the heap cap doesn't reduce it. Without
+SonarQube for IDE, the 6 required extensions measure 1131–1429 MB in total (see above).
