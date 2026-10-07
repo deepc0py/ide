@@ -77,8 +77,12 @@ pub struct IdeExtData {
     pub views: RwSignal<Vector<ExtView>>,
     /// Live webviews keyed by handle.
     pub webviews: RwSignal<HashMap<String, IdeWebview>>,
-    /// Handle of the webview currently shown in the extension panel.
+    /// Handle of the webview currently shown in the extension dock.
     pub active_webview: RwSignal<Option<String>>,
+    /// Whether the extension webview dock is shown. Hidden by default; the user
+    /// reveals it (palette command / Claude Code status item / toggle) — opening
+    /// a webview never forces the dock open on its own.
+    pub dock_visible: RwSignal<bool>,
     /// Inline decorations keyed by document path.
     pub decorations: RwSignal<HashMap<PathBuf, Vector<Decoration>>>,
     /// Monotonic queue of host -> webview messages.
@@ -102,6 +106,7 @@ impl IdeExtData {
             views: cx.create_rw_signal(Vector::new()),
             webviews: cx.create_rw_signal(HashMap::new()),
             active_webview: cx.create_rw_signal(None),
+            dock_visible: cx.create_rw_signal(false),
             decorations: cx.create_rw_signal(HashMap::new()),
             post_messages: cx.create_rw_signal(Vector::new()),
             next_msg_id: cx.create_rw_signal(0),
@@ -145,6 +150,32 @@ impl IdeExtData {
             };
             sort(&mut left);
             sort(&mut right);
+            // De-duplicate items that render identically. Items are keyed by id
+            // in the map, but some extensions register two differently-ided
+            // items with the same label (e.g. a duplicate "Prettier"); collapse
+            // those to the first (highest-priority) one so the bar isn't noisy.
+            let render_key = |text: &str| {
+                let mut out = String::new();
+                let mut rest = text;
+                while let Some(start) = rest.find("$(") {
+                    out.push_str(&rest[..start]);
+                    match rest[start..].find(')') {
+                        Some(end) => rest = &rest[start + end + 1..],
+                        None => {
+                            rest = "";
+                            break;
+                        }
+                    }
+                }
+                out.push_str(rest);
+                out.split_whitespace().collect::<Vec<_>>().join(" ")
+            };
+            let dedup = |v: &mut Vec<StatusBarItem>| {
+                let mut seen = std::collections::HashSet::new();
+                v.retain(|item| seen.insert(render_key(&item.text)));
+            };
+            dedup(&mut left);
+            dedup(&mut right);
             (left, right)
         })
     }
@@ -218,7 +249,38 @@ impl IdeExtData {
             m.remove(handle);
         });
         if self.active_webview.get_untracked().as_deref() == Some(handle) {
-            self.active_webview.set(None);
+            // Fall back to another live webview, or hide the dock if none remain.
+            let next = self
+                .webviews
+                .with_untracked(|m| m.keys().next().cloned());
+            self.active_webview.set(next.clone());
+            if next.is_none() {
+                self.dock_visible.set(false);
+            }
+        }
+    }
+
+    /// Reveal the extension webview dock, showing `handle` (or the first live
+    /// webview). Used by the "open extension view" affordances.
+    pub fn show_dock(&self, handle: Option<String>) {
+        let handle = handle.or_else(|| {
+            self.active_webview
+                .get_untracked()
+                .or_else(|| self.webviews.with_untracked(|m| m.keys().next().cloned()))
+        });
+        if handle.is_some() {
+            self.active_webview.set(handle);
+        }
+        self.dock_visible.set(true);
+    }
+
+    /// Toggle the extension webview dock. When revealing it with nothing active,
+    /// select the first available webview.
+    pub fn toggle_dock(&self) {
+        if self.dock_visible.get_untracked() {
+            self.dock_visible.set(false);
+        } else {
+            self.show_dock(None);
         }
     }
 

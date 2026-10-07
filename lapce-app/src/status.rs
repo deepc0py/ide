@@ -77,21 +77,27 @@ pub fn status(
     let ext_proxy = window_tab_data.common.proxy.clone();
     let left_ext_items = {
         let ide_ext = ide_ext.clone();
+        let ide_ext_build = ide_ext.clone();
         let proxy = ext_proxy.clone();
         dyn_stack(
             move || ide_ext.status_items_split().0,
             |item: &StatusBarItem| item.id.clone(),
-            move |item| ext_status_item(config, proxy.clone(), item),
+            move |item| {
+                ext_status_item(config, proxy.clone(), ide_ext_build.clone(), item)
+            },
         )
         .style(|s| s.height_pct(100.0).items_center())
     };
     let right_ext_items = {
         let ide_ext = ide_ext.clone();
+        let ide_ext_build = ide_ext.clone();
         let proxy = ext_proxy.clone();
         dyn_stack(
             move || ide_ext.status_items_split().1,
             |item: &StatusBarItem| item.id.clone(),
-            move |item| ext_status_item(config, proxy.clone(), item),
+            move |item| {
+                ext_status_item(config, proxy.clone(), ide_ext_build.clone(), item)
+            },
         )
         .style(|s| s.height_pct(100.0).items_center())
     };
@@ -517,23 +523,59 @@ fn strip_codicons(text: &str) -> String {
     out.trim().to_string()
 }
 
+/// If `item` belongs to an extension that registered a webview view, return the
+/// live webview handle to reveal when its status-bar item is clicked (so e.g.
+/// clicking "Claude Code" opens Claude's view in the dock).
+fn webview_for_status_item(
+    ide_ext: &crate::ide_ext::IdeExtData,
+    item: &StatusBarItem,
+) -> Option<String> {
+    let token = |s: &str| {
+        s.split(|c| c == '.' || c == ':' || c == '-')
+            .next()
+            .unwrap_or("")
+            .to_lowercase()
+    };
+    let mut item_tokens = vec![token(&item.id)];
+    if let Some(cmd) = item.command.as_deref() {
+        item_tokens.push(token(cmd));
+    }
+    item_tokens.retain(|t| !t.is_empty());
+    let views = ide_ext.views.get_untracked();
+    let webviews = ide_ext.webviews.get_untracked();
+    for v in views.iter().filter(|v| v.is_webview()) {
+        let vt = token(&v.id);
+        if item_tokens.iter().any(|t| t == &vt) {
+            if let Some((handle, _)) =
+                webviews.iter().find(|(_, w)| w.view_type == v.id)
+            {
+                return Some(handle.clone());
+            }
+        }
+    }
+    None
+}
+
 /// Render a single extension-host status-bar item, matching the native
 /// status-bar styling and executing its command (if any) on click.
 fn ext_status_item(
     config: ReadSignal<Arc<LapceConfig>>,
     proxy: ProxyRpcHandler,
+    ide_ext: crate::ide_ext::IdeExtData,
     item: StatusBarItem,
 ) -> impl View {
     let text = strip_codicons(&item.text);
     let command = item.command.clone();
     let tooltip = item.tooltip.clone();
-    let clickable = command.is_some();
+    let reveal = webview_for_status_item(&ide_ext, &item);
+    let clickable = command.is_some() || reveal.is_some();
     let content = label(move || text.clone()).style(move |s| {
         let config = config.get();
         let s = s
             .height_full()
             .padding_horiz(10.0)
             .items_center()
+            .flex_shrink(0.0_f32)
             .color(config.color(LapceColor::STATUS_FOREGROUND))
             .selectable(false);
         if clickable {
@@ -546,13 +588,18 @@ fn ext_status_item(
             s
         }
     });
-    let content = if let Some(command) = command {
+    let content = if clickable {
         content.on_click_stop(move |_| {
-            proxy.ext_host_request(
-                "workspace/executeCommand".to_string(),
-                json!({ "command": command.clone(), "arguments": [] }),
-                |_| {},
-            );
+            if let Some(command) = command.clone() {
+                proxy.ext_host_request(
+                    "workspace/executeCommand".to_string(),
+                    json!({ "command": command, "arguments": [] }),
+                    |_| {},
+                );
+            }
+            if let Some(handle) = reveal.clone() {
+                ide_ext.show_dock(Some(handle));
+            }
         })
     } else {
         content

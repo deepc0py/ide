@@ -114,21 +114,24 @@ impl ProxyHandler for Dispatcher {
                 // LSP bridge it returns. Runs off-thread because starting the
                 // host blocks on node boot the first time.
                 #[cfg(unix)]
-                if let Some(ws) = self.workspace.clone() {
-                    let proxy_rpc = self.proxy_rpc.clone();
-                    let slot = self.exthost_workspace_id.clone();
-                    thread::spawn(move || {
-                        if let Some(res) = crate::exthost::open_workspace(vec![ws])
-                        {
-                            *slot.lock() = Some(res.workspace_id);
-                            proxy_rpc.attach_lsp_server(
-                                "exthost".to_string(),
-                                res.lsp_socket,
-                                Vec::new(),
-                                Vec::new(),
-                            );
-                        }
-                    });
+                if crate::exthost::enabled() {
+                    if let Some(ws) = self.workspace.clone() {
+                        let proxy_rpc = self.proxy_rpc.clone();
+                        let slot = self.exthost_workspace_id.clone();
+                        thread::spawn(move || {
+                            if let Some(res) =
+                                crate::exthost::open_workspace(vec![ws])
+                            {
+                                *slot.lock() = Some(res.workspace_id);
+                                proxy_rpc.attach_lsp_server(
+                                    "exthost".to_string(),
+                                    res.lsp_socket,
+                                    Vec::new(),
+                                    Vec::new(),
+                                );
+                            }
+                        });
+                    }
                 }
                 self.core_rpc.notification(CoreNotification::ProxyStatus {
                     status: lapce_rpc::proxy::ProxyStatus::Connected,

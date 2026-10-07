@@ -72,7 +72,7 @@ ide-webview = { path = "../ide-webview", optional = true }
 # parent handle for the native extension webview.
 objc2            = { version = "0.6", optional = true }
 objc2-app-kit    = { version = "0.3", optional = true, features = ["NSApplication", "NSResponder", "NSWindow", "NSView"] }
-objc2-foundation = { version = "0.3", optional = true }
+objc2-foundation = { version = "0.3", optional = true, features = ["NSArray", "NSEnumerator", "NSGeometry"] }
 
 [target.'cfg(windows)'.dependencies.windows-sys]
 workspace = true

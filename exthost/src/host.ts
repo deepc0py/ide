@@ -11,11 +11,12 @@ import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import minimist from 'minimist';
 
-const argv = minimist(process.argv.slice(2), { string: ['control-socket', 'extensions-dir', 'data-dir', 'home'] });
+const argv = minimist(process.argv.slice(2), { string: ['control-socket', 'extensions-dir', 'data-dir', 'home', 'parent-pid'] });
 const controlSocket: string = argv['control-socket'];
 const extensionsDir: string = argv['extensions-dir'];
 const dataDir: string = argv['data-dir'] ?? process.env.IDE_DATA_DIR ?? '/tmp/ide-exthost-data';
 const home: string = argv['home'] ?? process.env.HOME ?? dataDir;
+const parentPid: number = Number.parseInt(String(argv['parent-pid'] ?? '0'), 10) || 0;
 
 if (!controlSocket || !extensionsDir) {
 	console.error('usage: node host.js --control-socket <path> --extensions-dir <dir> --data-dir <dir> [--home <dir>]');
@@ -160,5 +161,32 @@ try { fs.unlinkSync(controlSocket); } catch { /* fresh */ }
 const server = net.createServer(handleConnection);
 server.listen(controlSocket, () => console.error(`[host] control socket listening at ${controlSocket}`));
 
-process.on('SIGTERM', () => { worker?.postMessage({ type: 'close' }); server.close(); process.exit(0); });
-process.on('SIGINT', () => { worker?.postMessage({ type: 'close' }); server.close(); process.exit(0); });
+let shuttingDown = false;
+function shutdown(code: number): void {
+	if (shuttingDown) { return; }
+	shuttingDown = true;
+	try { worker?.postMessage({ type: 'close' }); } catch { /* ignore */ }
+	try { server.close(); } catch { /* ignore */ }
+	process.exit(code);
+}
+
+process.on('SIGTERM', () => shutdown(0));
+process.on('SIGINT', () => shutdown(0));
+
+// When launched by the IDE/proxy we are told its pid. If that process dies
+// (even via SIGKILL, so it never gets to kill us), take the whole process group
+// down: otherwise an orphaned host keeps an inherited stdout pipe open and hangs
+// the parent (e.g. `cargo test`). We were started as our own group leader, so a
+// negative pid signals the group (host + language servers).
+if (parentPid > 0) {
+	const watchdog = setInterval(() => {
+		let alive = true;
+		try { process.kill(parentPid, 0); } catch { alive = false; }
+		if (!alive) {
+			try { worker?.postMessage({ type: 'close' }); } catch { /* ignore */ }
+			try { process.kill(-process.pid, 'SIGKILL'); } catch { /* ignore */ }
+			process.exit(0);
+		}
+	}, 1000);
+	watchdog.unref();
+}

@@ -135,6 +135,9 @@ async function main(): Promise<void> {
 	const openWorkspace = async (id: string, folders: string[], lspSocket: string): Promise<void> => {
 		const ws = new Workspace(id, folders);
 		session.addWorkspace(ws);
+		// Bring this window up to date with contributions extensions already made
+		// (status bar, commands, views, decorations) for late-joining windows.
+		session.replayTo(ws);
 		await syncWorkspace();
 		try { fs.unlinkSync(lspSocket); } catch { /* fresh */ }
 		const server = net.createServer((socket) => {

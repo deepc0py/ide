@@ -457,6 +457,10 @@ impl AppData {
         info: WindowInfo,
         files: Vec<PathObject>,
     ) -> impl View + use<> {
+        // Record window creation order so native webviews can be parented to
+        // the right window even when the app is never focused.
+        #[cfg(all(feature = "webview", target_os = "macos"))]
+        crate::webview_view::register_window_ordinal(window_id);
         let app_view_id = create_rw_signal(floem::ViewId::new());
         let window_data = WindowData::new(
             window_id,
@@ -647,6 +651,11 @@ impl AppData {
                 }
             })
             .on_event_stop(EventListener::WindowGotFocus, move |_| {
+                // While this floem window is focused the AppKit key window is
+                // exactly it, so record the mapping used to parent native
+                // webviews to the right window.
+                #[cfg(all(feature = "webview", target_os = "macos"))]
+                crate::webview_view::register_focused_window(window_id);
                 app_command.send(AppCommand::WindowGotFocus(window_id));
             })
             .on_event_stop(EventListener::WindowClosed, move |_| {
@@ -3802,6 +3811,16 @@ fn window(window_data: WindowData) -> impl View {
 
 pub fn launch() {
     let cli = Cli::parse();
+
+    // The `ide` binary spawns the shared VS Code extension host by default.
+    // Tests opt in explicitly via this same variable (see lapce-proxy's
+    // `exthost::enabled`); respect an explicit override if the user set one.
+    if std::env::var_os("IDE_EXTHOST_ENABLE").is_none() {
+        // SAFETY: set once at startup before any worker thread/Dispatcher runs.
+        unsafe {
+            std::env::set_var("IDE_EXTHOST_ENABLE", "1");
+        }
+    }
 
     if !cli.wait {
         logging::panic_hook();

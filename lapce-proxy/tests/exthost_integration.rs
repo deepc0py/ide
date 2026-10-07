@@ -128,6 +128,9 @@ fn exthost_language_and_ui_bridge() {
     // data dirs *before* starting the dispatcher (which reads them when it
     // opens the workspace).
     unsafe {
+        // Opt in to spawning the shared host for this test only (other proxy
+        // tests must not spawn node).
+        std::env::set_var("IDE_EXTHOST_ENABLE", "1");
         std::env::set_var("IDE_EXTHOST", get("hostJs"));
         std::env::set_var("IDE_EXTENSIONS_DIR", get("extensionsDir"));
         std::env::set_var("IDE_EXTHOST_DATA", get("dataDir"));
@@ -266,8 +269,100 @@ fn exthost_language_and_ui_bridge() {
         _ => unreachable!(),
     }
 
-    h.shutdown();
+    // Late-joining window: a *second* window opened now (after the extensions
+    // already contributed) must be brought up to date — it should receive the
+    // current status-bar items, registered views and command list, and resolve
+    // its own Claude webview instance (a handle distinct from window A's).
+    let dir_b = common::temp_workspace("exthost-latejoin");
+    let hb = Harness::new(dir_b);
+
+    let status_b = hb
+        .wait_from(0, Duration::from_secs(60), |n| {
+            matches!(n, CoreNotification::IdeStatusBarSet { .. })
+        })
+        .expect("late window received a replayed ide/statusBar/set");
+    if let CoreNotification::IdeStatusBarSet { item } = &status_b {
+        eprintln!("[itest] late-join statusBar[{}]", item.id);
+    }
+
+    let view_b = hb
+        .wait_from(0, Duration::from_secs(60), |n| match n {
+            CoreNotification::IdeViewsRegister { views } => views
+                .iter()
+                .any(|v| v.is_webview() || v.id.to_lowercase().contains("claude")),
+            _ => false,
+        })
+        .expect("late window received a replayed ide/views/register");
+    let view_id_b = match &view_b {
+        CoreNotification::IdeViewsRegister { views } => views
+            .iter()
+            .find(|v| v.is_webview() || v.id.to_lowercase().contains("claude"))
+            .map(|v| v.id.clone())
+            .unwrap(),
+        _ => unreachable!(),
+    };
+
+    let mut commands_b: Vec<ide_ext::ExtCommand> = Vec::new();
+    let deadline_b = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline_b {
+        if let Ok(result) =
+            ext_host_request(&hb, "ide/commands/list", json!({}), Duration::from_secs(10))
+        {
+            if let Ok(list) =
+                serde_json::from_value::<ide_ext::CommandsListResult>(result)
+            {
+                if !list.commands.is_empty() {
+                    commands_b = list.commands;
+                    break;
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+    assert!(
+        !commands_b.is_empty(),
+        "late window sees an empty command list after replay"
+    );
+    eprintln!("[itest] late-join commands: {}", commands_b.len());
+
+    let resolve_mark_b = hb.mark();
+    let resolved_b = ext_host_request(
+        &hb,
+        "ide/webview/resolveView",
+        json!({ "viewId": view_id_b }),
+        Duration::from_secs(30),
+    )
+    .expect("late window resolveView request");
+    let handle_b = resolved_b
+        .get("handle")
+        .and_then(Value::as_str)
+        .expect("late window resolveView returned a handle");
+    assert_ne!(
+        handle_b, handle,
+        "late window must resolve its own distinct webview handle"
+    );
+    eprintln!("[itest] late-join resolved handle: {handle_b} (A was {handle})");
+
+    let created_b = hb
+        .wait_from(resolve_mark_b, Duration::from_secs(40), |n| match n {
+            CoreNotification::IdeWebviewCreate { webview } => !webview.html.is_empty(),
+            CoreNotification::IdeWebviewSetHtml { html, .. } => !html.is_empty(),
+            _ => false,
+        })
+        .expect("late window ide/webview/create with non-empty html");
+    match &created_b {
+        CoreNotification::IdeWebviewCreate { webview } => {
+            eprintln!("[itest] late-join webview html: {} bytes", webview.html.len())
+        }
+        CoreNotification::IdeWebviewSetHtml { html, .. } => {
+            eprintln!("[itest] late-join webview html (setHtml): {} bytes", html.len())
+        }
+        _ => unreachable!(),
+    }
+
     let _ = git_tracked_uri;
+    hb.shutdown();
+    h.shutdown();
 }
 
 fn which_node() -> Option<PathBuf> {

@@ -77,6 +77,17 @@ export class Session {
 	readonly contextKeys = new Map<string, unknown>();
 	readonly workspaces = new Map<string, Workspace>();
 
+	// Current global contribution state, retained so a window that opens *after*
+	// extensions already contributed (late join) can be brought up to date. Keyed
+	// for idempotent replace/remove.
+	readonly statusBarItems = new Map<string, unknown>();
+	readonly views = new Map<string, unknown>();
+	readonly decorations = new Map<string, unknown>();
+	// Owning window of a per-window resolved webview *view* handle, so its html /
+	// options / messages route only to the window that resolved it (each window
+	// resolves its own instance) instead of broadcasting to every window.
+	readonly webviewOwners = new Map<string, Workspace>();
+
 	constructor(
 		readonly rpc: RPCProtocol,
 		readonly log: (msg: string) => void,
@@ -94,7 +105,15 @@ export class Session {
 	}
 
 	addWorkspace(ws: Workspace): void { this.workspaces.set(ws.id, ws); }
-	removeWorkspace(id: string): void { this.workspaces.delete(id); }
+	removeWorkspace(id: string): void {
+		const ws = this.workspaces.get(id);
+		if (ws) {
+			for (const [handle, owner] of this.webviewOwners) {
+				if (owner === ws) { this.webviewOwners.delete(handle); }
+			}
+		}
+		this.workspaces.delete(id);
+	}
 
 	// The window that owns a URI: the one whose folder is the longest path prefix.
 	workspaceForUri(uri: string): Workspace | undefined {
@@ -129,6 +148,23 @@ export class Session {
 	// Send a global event to every window (commands, status bar, view registration).
 	broadcast(method: string, params: unknown): void {
 		for (const ws of this.workspaces.values()) { ws.notify(method, params); }
+	}
+
+	// Bring a window that opened after extensions already contributed up to date:
+	// replay the current commands, status-bar items, registered views and the
+	// decorations for documents this window owns. Buffered on the Workspace until
+	// its LSP client attaches, so the ordering versus live events is preserved.
+	replayTo(ws: Workspace): void {
+		if (this.commands.size > 0) {
+			ws.notify('ide/commands/changed', {
+				commands: [...this.commands].map((c) => ({ id: c, title: c, category: '' })),
+			});
+		}
+		for (const item of this.statusBarItems.values()) { ws.notify('ide/statusBar/set', item); }
+		for (const view of this.views.values()) { ws.notify('ide/views/register', view); }
+		for (const [uri, params] of this.decorations) {
+			if (this.workspaceForUri(uri) === ws) { ws.notify('ide/decorations/set', params); }
+		}
 	}
 
 	// Send a request to the owning window if known, else the primary window.

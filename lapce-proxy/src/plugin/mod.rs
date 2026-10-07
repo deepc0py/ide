@@ -406,6 +406,19 @@ impl PluginCatalogRpcHandler {
         Ok(())
     }
 
+    /// Send a request to every attached plugin/language server and aggregate.
+    ///
+    /// With the shared extension host attached as a catch-all server, a single
+    /// capability (definition, hover, formatting, …) can be served by multiple
+    /// servers at once (e.g. `typescript-language-server` **and** the exthost
+    /// bridge). The old "first OK wins" policy let whichever server answered
+    /// first win — so a fast server that supports the method but has *nothing*
+    /// to return (an empty array / null, as the exthost bridge does for files
+    /// none of its extensions handle) would shadow the real server's answer and
+    /// the client would poll forever. We instead deliver the first **non-empty**
+    /// successful response as soon as it arrives (so a slow/empty server can
+    /// never hide or block a good one), and only fall back to an empty success
+    /// (or, failing that, an error) once every server has responded.
     fn send_request_to_all_plugins<P, Resp>(
         &self,
         method: &'static str,
@@ -417,9 +430,20 @@ impl PluginCatalogRpcHandler {
         P: Serialize,
         Resp: DeserializeOwned,
     {
-        let got_success = Arc::new(AtomicBool::new(false));
+        let delivered = Arc::new(AtomicBool::new(false));
+        let responses = Arc::new(AtomicUsize::new(0));
         let request_sent = Arc::new(AtomicUsize::new(0));
-        let err_received = Arc::new(AtomicUsize::new(0));
+        // The best result we have seen that is *not* a real (non-empty) answer:
+        // an empty success is preferred over an error so callers see "nothing
+        // here" rather than a spurious failure.
+        let fallback: Arc<Mutex<Option<(PluginId, Result<Value, RpcError>)>>> =
+            Arc::new(Mutex::new(None));
+        let deserialize = |value: Value| -> Result<Resp, RpcError> {
+            serde_json::from_value::<Resp>(value).map_err(|_| RpcError {
+                code: 0,
+                message: "deserialize error".to_string(),
+            })
+        };
         self.send_request(
             None,
             Some(request_sent.clone()),
@@ -429,29 +453,43 @@ impl PluginCatalogRpcHandler {
             path,
             true,
             move |plugin_id, result| {
-                if got_success.load(Ordering::Acquire) {
+                if delivered.load(Ordering::Acquire) {
                     return;
                 }
-                let result = match result {
-                    Ok(value) => {
-                        if let Ok(item) = serde_json::from_value::<Resp>(value) {
-                            got_success.store(true, Ordering::Release);
-                            Ok(item)
-                        } else {
-                            Err(RpcError {
-                                code: 0,
-                                message: "deserialize error".to_string(),
-                            })
+                let count = responses.fetch_add(1, Ordering::AcqRel) + 1;
+
+                // A real answer: deliver immediately, ignoring any stragglers.
+                if let Ok(value) = &result {
+                    if !value_is_empty(value) {
+                        if !delivered.swap(true, Ordering::AcqRel) {
+                            cb(plugin_id, deserialize(value.clone()));
                         }
+                        return;
                     }
-                    Err(e) => Err(e),
-                };
-                if result.is_ok() {
-                    cb(plugin_id, result)
-                } else {
-                    let rx = err_received.fetch_add(1, Ordering::Relaxed) + 1;
-                    if request_sent.load(Ordering::Acquire) == rx {
-                        cb(plugin_id, result)
+                }
+
+                // Empty success or error: keep it as a fallback (prefer OK).
+                {
+                    let mut fb = fallback.lock();
+                    let replace = match (&*fb, &result) {
+                        (None, _) => true,
+                        (Some((_, Err(_))), Ok(_)) => true,
+                        _ => false,
+                    };
+                    if replace {
+                        *fb = Some((plugin_id, result));
+                    }
+                }
+
+                // Everyone has answered and nobody had a real result: deliver
+                // the best fallback we saw.
+                let total = request_sent.load(Ordering::Acquire);
+                if total != 0
+                    && count >= total
+                    && !delivered.swap(true, Ordering::AcqRel)
+                {
+                    if let Some((pid, res)) = fallback.lock().take() {
+                        cb(pid, res.and_then(deserialize));
                     }
                 }
             },
@@ -1636,6 +1674,21 @@ pub enum PluginNotification {
     MakeFileExecutable {
         path: PathBuf,
     },
+}
+
+/// Whether an LSP result value carries no real answer, i.e. the server
+/// supports the method but had nothing to contribute for this document. Used by
+/// multi-server request fan-out so an empty responder never shadows a real one.
+fn value_is_empty(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Array(items) => items.is_empty(),
+        Value::String(s) => s.is_empty(),
+        // An empty object ({}) carries nothing; a populated one (a Hover, a
+        // Location, a CompletionList with items) is a real answer.
+        Value::Object(map) => map.is_empty(),
+        _ => false,
+    }
 }
 
 pub fn volt_icon(volt: &VoltMetadata) -> Option<Vec<u8>> {

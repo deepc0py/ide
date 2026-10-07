@@ -110,6 +110,42 @@ export function installMainShim(session: Session, deps: ShimDeps): MainShim {
 	// -- webview html staging --
 	const webviewHtml = new Map<string, string>();
 	const webviewCreated = new Set<string>();
+	// Content options per webview (enableScripts / localResourceRoots). VS Code
+	// delivers these via $setOptions (and panel initData) *before* the first
+	// $setHtml; without forwarding them the native host disables scripts and
+	// rejects every resource, so extension webviews render blank.
+	const webviewOptions = new Map<
+		string,
+		{ enableScripts: boolean; localResourceRoots: string[] }
+	>();
+	const normalizeWebviewOptions = (
+		o: unknown,
+	): { enableScripts: boolean; localResourceRoots: string[] } => {
+		const opt = (o ?? {}) as {
+			enableScripts?: boolean;
+			localResourceRoots?: unknown[];
+		};
+		let roots: string[] = [];
+		if (Array.isArray(opt.localResourceRoots)) {
+			roots = opt.localResourceRoots.map((u) => {
+				try {
+					return URI.revive(u as UriComponents).fsPath;
+				} catch {
+					return String(u);
+				}
+			});
+		}
+		return { enableScripts: !!opt.enableScripts, localResourceRoots: roots };
+	};
+
+	// Route a webview event to the window that resolved it (webview *views* are
+	// resolved per window, so Claude's sidebar in window B must not leak into
+	// window A) and otherwise broadcast (webview *panels* have no single owner).
+	const emitWebview = (handle: string, method: string, params: unknown): void => {
+		const owner = session.webviewOwners.get(handle);
+		if (owner) { owner.notify(method, params); }
+		else { session.broadcast(method, params); }
+	};
 
 	const impls: Partial<Record<string, Actor>> = {
 		MainThreadExtensionService: {
@@ -256,9 +292,14 @@ export function installMainShim(session: Session, deps: ShimDeps): MainShim {
 		MainThreadLanguageFeatures: makeLanguageFeatures(session),
 		MainThreadLanguages: {
 			$setLanguageStatus(handle: number, status: { label?: string; detail?: string; command?: { title?: string } }) {
-				session.broadcast('ide/statusBar/set', { id: `lang.${handle}`, text: status.label ?? '', tooltip: status.detail ?? '', alignment: 'right', priority: 0 });
+				const item = { id: `lang.${handle}`, text: status.label ?? '', tooltip: status.detail ?? '', alignment: 'right', priority: 0 };
+				session.statusBarItems.set(item.id, item);
+				session.broadcast('ide/statusBar/set', item);
 			},
-			$removeLanguageStatus(handle: number) { session.broadcast('ide/statusBar/remove', { id: `lang.${handle}` }); },
+			$removeLanguageStatus(handle: number) {
+				session.statusBarItems.delete(`lang.${handle}`);
+				session.broadcast('ide/statusBar/remove', { id: `lang.${handle}` });
+			},
 			async $changeLanguage(uriComp: UriComponents, languageId: string) {
 				const doc = session.documents.get(URI.revive(uriComp).toString());
 				if (doc) { doc.languageId = languageId; }
@@ -282,15 +323,20 @@ export function installMainShim(session: Session, deps: ShimDeps): MainShim {
 		},
 		MainThreadStatusBar: {
 			$setEntry(id: string, _statusId: string, _extId: string | undefined, _name: string, text: string, tooltip: unknown, _hasTip: boolean, command: { id?: string } | undefined, _color: unknown, _bg: unknown, alignLeft: boolean, priority: number | undefined) {
-				session.broadcast('ide/statusBar/set', {
+				const item = {
 					id, text,
 					tooltip: toPlainText(tooltip),
 					command: command?.id,
 					alignment: alignLeft ? 'left' : 'right',
 					priority: priority ?? 0,
-				});
+				};
+				session.statusBarItems.set(id, item);
+				session.broadcast('ide/statusBar/set', item);
 			},
-			$disposeEntry(id: string) { session.broadcast('ide/statusBar/remove', { id }); },
+			$disposeEntry(id: string) {
+				session.statusBarItems.delete(id);
+				session.broadcast('ide/statusBar/remove', { id });
+			},
 		},
 		MainThreadOutputService: {
 			async $register(label: string) { return `output-${label}`; },
@@ -398,38 +444,69 @@ export function installMainShim(session: Session, deps: ShimDeps): MainShim {
 				webviewHtml.set(handle, value);
 				if (webviewCreated.has(handle)) {
 					// Panel already announced via $createWebviewPanel.
-					session.broadcast('ide/webview/setHtml', { handle, html: value });
+					emitWebview(handle, 'ide/webview/setHtml', { handle, html: value });
 				} else if (firstSet) {
 					// Webview *view* (e.g. Claude sidebar): announce it on first html.
 					webviewCreated.add(handle);
-					session.broadcast('ide/webview/create', { handle, viewType: handle, title: '', html: value, options: {}, kind: 'view' });
+					emitWebview(handle, 'ide/webview/create', {
+						handle,
+						viewType: handle,
+						title: '',
+						html: value,
+						options: webviewOptions.get(handle) ?? {
+							enableScripts: false,
+							localResourceRoots: [],
+						},
+						kind: 'view',
+					});
 				} else {
-					session.broadcast('ide/webview/setHtml', { handle, html: value });
+					emitWebview(handle, 'ide/webview/setHtml', { handle, html: value });
 				}
 			},
-			$setOptions() { /* options tracked client-side */ },
+			$setOptions(handle: string, options: unknown) {
+				const normalized = normalizeWebviewOptions(options);
+				webviewOptions.set(handle, normalized);
+				// If the webview was already announced, re-announce so the client
+				// applies the updated scripts/resource-root policy.
+				if (webviewCreated.has(handle)) {
+					emitWebview(handle, 'ide/webview/create', {
+						handle,
+						viewType: handle,
+						title: '',
+						html: webviewHtml.get(handle) ?? '',
+						options: normalized,
+						kind: 'view',
+					});
+				}
+			},
 			async $postMessage(handle: string, value: string) {
-				session.broadcast('ide/webview/postMessage', { handle, message: safeParse(value) });
+				emitWebview(handle, 'ide/webview/postMessage', { handle, message: safeParse(value) });
 				return true;
 			},
 		},
 		MainThreadWebviewPanels: {
-			$createWebviewPanel(_ext: unknown, handle: string, viewType: string, initData: { title?: string }, _show: unknown) {
+			$createWebviewPanel(_ext: unknown, handle: string, viewType: string, initData: { title?: string; webviewOptions?: unknown; contentOptions?: unknown }, _show: unknown) {
 				webviewCreated.add(handle);
-				session.broadcast('ide/webview/create', { handle, viewType, title: initData.title ?? viewType, html: webviewHtml.get(handle) ?? '', options: {}, kind: 'panel' });
+				const opts =
+					webviewOptions.get(handle) ??
+					normalizeWebviewOptions(initData.contentOptions ?? initData.webviewOptions);
+				webviewOptions.set(handle, opts);
+				session.broadcast('ide/webview/create', { handle, viewType, title: initData.title ?? viewType, html: webviewHtml.get(handle) ?? '', options: opts, kind: 'panel' });
 			},
-			$disposeWebview(handle: string) { session.broadcast('ide/webview/dispose', { handle }); webviewCreated.delete(handle); },
+			$disposeWebview(handle: string) { emitWebview(handle, 'ide/webview/dispose', { handle }); webviewCreated.delete(handle); session.webviewOwners.delete(handle); },
 			$reveal() { /* noop */ },
-			$setTitle(handle: string, value: string) { session.broadcast('ide/webview/setTitle', { handle, title: value }); },
+			$setTitle(handle: string, value: string) { emitWebview(handle, 'ide/webview/setTitle', { handle, title: value }); },
 			$setIconPath() { /* noop */ },
 			$registerSerializer() { /* noop */ },
 			$unregisterSerializer() { /* noop */ },
 		},
 		MainThreadWebviewViews: {
 			$registerWebviewViewProvider(_ext: unknown, viewType: string) {
-				session.broadcast('ide/views/register', { id: viewType, name: viewType, container: '', kind: 'webview' });
+				const view = { id: viewType, name: viewType, container: '', kind: 'webview' };
+				session.views.set(viewType, view);
+				session.broadcast('ide/views/register', view);
 			},
-			$unregisterWebviewViewProvider() { /* noop */ },
+			$unregisterWebviewViewProvider(viewType: string) { session.views.delete(viewType); },
 			$setWebviewViewTitle() { /* noop */ },
 			$setWebviewViewDescription() { /* noop */ },
 			$setWebviewViewBadge() { /* noop */ },
@@ -437,14 +514,16 @@ export function installMainShim(session: Session, deps: ShimDeps): MainShim {
 		},
 		MainThreadTreeViews: {
 			async $registerTreeViewDataProvider(treeViewId: string) {
-				session.broadcast('ide/views/register', { id: treeViewId, name: treeViewId, container: '', kind: 'tree' });
+				const view = { id: treeViewId, name: treeViewId, container: '', kind: 'tree' };
+				session.views.set(treeViewId, view);
+				session.broadcast('ide/views/register', view);
 			},
 			async $refresh() { /* noop */ },
 			async $reveal() { /* noop */ },
 			$setMessage() { /* noop */ },
 			$setTitle() { /* noop */ },
 			$setBadge() { /* noop */ },
-			async $disposeTree() { /* noop */ },
+			async $disposeTree(treeViewId: string) { session.views.delete(treeViewId); },
 		},
 		MainThreadTextEditors: {
 			async $tryShowTextDocument() { return undefined; },
@@ -464,7 +543,9 @@ export function installMainShim(session: Session, deps: ShimDeps): MainShim {
 						: undefined,
 					hoverMessage: hoverText(r.hoverMessage),
 				}));
-				session.notifyUri(doc, 'ide/decorations/set', { uri: doc, decorations });
+				const payload = { uri: doc, decorations };
+				session.decorations.set(doc, payload);
+				session.notifyUri(doc, 'ide/decorations/set', payload);
 			},
 			async $trySetDecorationsFast() { /* no content payload */ },
 			async $tryRevealRange() { /* noop */ },

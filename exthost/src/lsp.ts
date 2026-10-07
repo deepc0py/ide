@@ -24,6 +24,10 @@ interface JsonRpcMessage {
 
 const COMPLETION_TRIGGER_CHARS = ['.', ':', '>', '"', "'", '/', '@', '<', ' ', '(', ',', '='];
 
+// Monotonic across all windows so each resolved webview-view instance gets a
+// distinct handle even when two windows resolve the same view simultaneously.
+let resolveCounter = 0;
+
 // Match a DocumentFilter.pattern (glob string or RelativePattern) against a path.
 function patternMatches(pattern: NonNullable<IDocumentFilterDto['pattern']>, fsPath: string): boolean {
 	let glob: string;
@@ -402,8 +406,15 @@ export class LspConnection {
 	// ---- custom ide/* -------------------------------------------------------
 
 	private async resolveView(params: unknown): Promise<unknown> {
-		const viewId = (params as { viewId: string }).viewId;
-		const handle = `view:${viewId}:${Date.now()}`;
+		const viewId = params && typeof params === 'object' && 'viewId' in params && typeof params.viewId === 'string'
+			? params.viewId
+			: '';
+		// Unique per resolution so each window gets its own webview instance (the
+		// counter guards against two windows resolving within the same millisecond).
+		const handle = `view:${viewId}:${this.workspace.id}:${Date.now()}:${++resolveCounter}`;
+		// Record ownership *before* resolving: the extension calls $setHtml during
+		// resolve, and emitWebview must route that create to this window only.
+		this.session.webviewOwners.set(handle, this.workspace);
 		await this.session.proxy(ExtHostContext.ExtHostWebviewViews).$resolveWebviewView(handle, viewId, viewId, undefined, CancellationToken.None);
 		return { handle };
 	}

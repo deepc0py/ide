@@ -285,3 +285,47 @@ test('two windows: diagnostics route to the owning window only (isolation)', { t
 	await ctx.control.request('host/closeWorkspace', { workspaceId: openA.workspaceId });
 	await ctx.control.request('host/closeWorkspace', { workspaceId: openB.workspaceId });
 });
+
+test('late-joining window replays contributions and resolves its own webview', { timeout: 90000 }, async () => {
+	// By now the primary window (window A = ctx.lsp) has activated every extension,
+	// so the host already holds live contributions: status-bar items, a non-empty
+	// command list and Claude's registered webview view. A window that opens *now*
+	// must be brought up to date (the late-join replay) rather than seeing nothing.
+	const dirB = path.join(ctx.root, 'late-join-b');
+	mkdirSync(path.join(dirB, 'src'), { recursive: true });
+	writeFileSync(path.join(dirB, 'index.ts'), 'export const x = 1;\n');
+	const openB = await ctx.control.request('host/openWorkspace', { folders: [dirB] });
+	const lspB = connect(openB.lspSocket);
+	await lspB.ready();
+	lspB.onServerRequest('window/showMessageRequest', () => null);
+	lspB.onServerRequest('workspace/applyEdit', () => ({ applied: true }));
+	await lspB.request('initialize', { processId: process.pid, rootUri: pathToFileURL(dirB).href, workspaceFolders: [{ uri: pathToFileURL(dirB).href, name: 'late-join-b' }], capabilities: {} });
+	lspB.notify('initialized', {});
+
+	// Replayed contributions are buffered on the window until its LSP client
+	// attaches, so they flush right after initialize — no re-activation needed.
+	const status = await lspB.waitForNotification((n) => n.method === 'ide/statusBar/set', 15000);
+	assert.ok(status, 'late window B received no replayed status-bar item');
+	const viewNote = await lspB.waitForNotification((n) => n.method === 'ide/views/register' && (n.params.kind === 'webview' || /claude/i.test(n.params.id)), 15000);
+	assert.ok(viewNote, 'late window B received no replayed view registration');
+	const cmds = await lspB.request('ide/commands/list', {});
+	assert.ok(cmds.commands.length > 0, 'late window B sees an empty command list');
+	console.log('LATE-JOIN B: status', JSON.stringify(status.params.id), 'view', JSON.stringify(viewNote.params.id), 'commands', cmds.commands.length);
+
+	// Window B resolves its OWN Claude webview instance: a handle distinct from
+	// window A's, with the create delivered only on B's socket (per-window view).
+	const resolvedA = await ctx.lsp.request('ide/webview/resolveView', { viewId: viewNote.params.id });
+	const resolvedB = await lspB.request('ide/webview/resolveView', { viewId: viewNote.params.id });
+	assert.ok(resolvedA.handle && resolvedB.handle, 'resolveView returned no handle');
+	assert.notEqual(resolvedB.handle, resolvedA.handle, 'late window B must resolve its own distinct webview handle');
+	const createdB = await lspB.waitForNotification((n) => (n.method === 'ide/webview/create' || n.method === 'ide/webview/setHtml') && n.params.handle === resolvedB.handle && n.params.html && n.params.html.length > 0, 30000);
+	assert.ok(createdB, 'late window B webview produced no HTML');
+	console.log('LATE-JOIN B: own webview handle', JSON.stringify(resolvedB.handle), 'html', createdB.params.html.length, 'bytes');
+
+	// B's resolved webview must not leak onto window A's socket.
+	await sleep(500);
+	assert.equal(ctx.lsp.takeNotifications((n) => (n.method === 'ide/webview/create' || n.method === 'ide/webview/setHtml') && n.params.handle === resolvedB.handle).length, 0, 'window A leaked window B webview');
+
+	lspB.close();
+	await ctx.control.request('host/closeWorkspace', { workspaceId: openB.workspaceId });
+});

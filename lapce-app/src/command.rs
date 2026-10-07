@@ -556,6 +556,10 @@ pub enum LapceWorkbenchCommand {
     #[strum(message = "Toggle Inlay Hints")]
     ToggleInlayHints,
 
+    #[strum(serialize = "toggle_extension_webview")]
+    #[strum(message = "Toggle Extension Webview")]
+    ToggleExtensionWebview,
+
     #[strum(serialize = "restart_to_update")]
     RestartToUpdate,
 

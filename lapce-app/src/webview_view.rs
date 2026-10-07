@@ -17,12 +17,16 @@ use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
+use std::sync::LazyLock;
+
+use parking_lot::Mutex;
 
 use floem::View;
 use floem::peniko::kurbo::{Point, Rect};
 use floem::reactive::{SignalGet, SignalWith, create_effect};
 use floem::views::{Decorators, container, dyn_container, empty, label, stack};
 use floem::IntoView;
+use floem::window::WindowId;
 use serde_json::json;
 
 use ide_webview::raw_window_handle::RawWindowHandle;
@@ -125,6 +129,20 @@ impl WebviewController {
         }
     }
 
+    /// Evaluate `js` in the page for `id`, delivering the result string to `cb`.
+    /// Used by the webview render self-test.
+    pub fn evaluate(
+        &self,
+        id: WebviewId,
+        js: &str,
+        cb: impl Fn(String) + Send + 'static,
+    ) -> Result<(), WebviewError> {
+        match self.webviews.borrow().get(&id) {
+            Some(handle) => handle.evaluate(js, cb),
+            None => Ok(()),
+        }
+    }
+
     /// Update the placeholder's window-relative origin (from floem `on_move`).
     fn set_origin(&self, id: WebviewId, origin: Point) {
         let bounds = {
@@ -201,19 +219,109 @@ fn webview_id_for(handle: &str) -> WebviewId {
     hasher.finish()
 }
 
-/// The content `NSView` of the current key/main floem window, as the parent
-/// handle for a native child webview. The pinned floem revision does not expose
-/// a window's raw handle, so we reach it through AppKit on the main thread.
-fn parent_window_handle() -> Option<RawWindowHandle> {
-    use ide_webview::raw_window_handle::AppKitWindowHandle;
+/// Maps each floem [`WindowId`] to its AppKit `NSWindow` pointer. Populated when
+/// a window gains focus (at which point the OS key window *is* that floem
+/// window), so webviews can be parented to the window that actually owns them
+/// even when several are open and a different one is focused. Pointers are only
+/// dereferenced on the main thread while the window is alive.
+static WINDOW_NSWINDOWS: LazyLock<Mutex<HashMap<WindowId, usize>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Floem windows in creation order, so each maps to the AppKit `NSWindow`
+/// created in the same order (used when focus events are unavailable).
+static WINDOW_ORDINALS: LazyLock<Mutex<Vec<WindowId>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
+
+/// Record the association `window_id -> key NSWindow`. Call from the floem
+/// `WindowGotFocus` handler: the AppKit key window is exactly this floem window.
+pub fn register_focused_window(window_id: WindowId) {
     use objc2::MainThreadMarker;
     use objc2::rc::Retained;
+    use objc2_app_kit::NSApplication;
+
+    register_window_ordinal(window_id);
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    if let Some(window) = app.keyWindow().or_else(|| app.mainWindow()) {
+        let ptr = Retained::as_ptr(&window) as usize;
+        WINDOW_NSWINDOWS.lock().insert(window_id, ptr);
+    }
+}
+
+/// Record this floem window in creation order. Called when the window is built,
+/// so each window maps to the AppKit `NSWindow` created in the same order even
+/// when the app is never focused (headless/background), where focus events and
+/// `keyWindow` are unavailable.
+pub fn register_window_ordinal(window_id: WindowId) {
+    let mut v = WINDOW_ORDINALS.lock();
+    if !v.contains(&window_id) {
+        v.push(window_id);
+    }
+}
+
+fn window_ordinal(window_id: WindowId) -> usize {
+    let mut v = WINDOW_ORDINALS.lock();
+    if let Some(i) = v.iter().position(|w| *w == window_id) {
+        return i;
+    }
+    v.push(window_id);
+    v.len() - 1
+}
+
+/// The content `NSView` to parent a native child webview to, for the floem
+/// window `window_id`. Resolution order:
+/// 1. the `NSWindow` recorded when this window was focused (most precise, real
+///    usage), else
+/// 2. the real `NSApp` window at this window's creation ordinal (works without
+///    focus — windows are created in the same order floem creates them, and
+///    `windowNumber` increases monotonically), else
+/// 3. the key/main window.
+///
+/// The pinned floem revision does not expose a window's raw handle, so we reach
+/// it through AppKit on the main thread.
+fn parent_window_handle(window_id: WindowId) -> Option<RawWindowHandle> {
+    use ide_webview::raw_window_handle::AppKitWindowHandle;
+    use objc2::rc::Retained;
+    use objc2::{MainThreadMarker, Message};
     use objc2_app_kit::{NSApplication, NSView, NSWindow};
 
     let mtm = MainThreadMarker::new()?;
     let app = NSApplication::sharedApplication(mtm);
-    let window: Retained<NSWindow> =
-        app.keyWindow().or_else(|| app.mainWindow())?;
+
+    // 1. A window we recorded while it was focused.
+    let mapped: Option<Retained<NSWindow>> = {
+        let ptr = WINDOW_NSWINDOWS.lock().get(&window_id).copied();
+        ptr.and_then(|ptr| {
+            let raw = ptr as *const NSWindow;
+            // SAFETY: main thread; the window is alive while its panel exists.
+            unsafe { raw.as_ref() }.map(|w| w.retain())
+        })
+    };
+
+    // 2. The real content window at this window's creation ordinal.
+    let by_ordinal = || -> Option<Retained<NSWindow>> {
+        let windows = app.windows();
+        let mut reals: Vec<Retained<NSWindow>> = windows
+            .iter()
+            .filter(|w| {
+                if w.contentView().is_none() {
+                    return false;
+                }
+                let f = w.frame();
+                // Skip tooltip/panel surfaces; content windows are sizeable.
+                f.size.width >= 200.0 && f.size.height >= 200.0
+            })
+            .collect();
+        reals.sort_by_key(|w| w.windowNumber());
+        let ordinal = window_ordinal(window_id);
+        reals.into_iter().nth(ordinal)
+    };
+
+    let window: Retained<NSWindow> = mapped
+        .or_else(by_ordinal)
+        .or_else(|| app.keyWindow().or_else(|| app.mainWindow()))?;
     let view: Retained<NSView> = window.contentView()?;
     let ptr = Retained::as_ptr(&view) as *mut std::ffi::c_void;
     let nn = std::ptr::NonNull::new(ptr)?;
@@ -229,6 +337,7 @@ pub fn ext_webview_panel(window_tab_data: Rc<WindowTabData>) -> impl View {
     let proxy = window_tab_data.common.proxy.clone();
     let config = window_tab_data.common.config;
 
+    let window_id = window_tab_data.common.window_common.window_id;
     let controller = WebviewController::new();
     let html_state: Rc<RefCell<HashMap<String, String>>> =
         Rc::new(RefCell::new(HashMap::new()));
@@ -269,7 +378,7 @@ pub fn ext_webview_panel(window_tab_data: Rc<WindowTabData>) -> impl View {
                 let id = webview_id_for(handle);
                 let known = html_state.borrow().contains_key(handle);
                 if !known {
-                    let Some(parent) = parent_window_handle() else {
+                    let Some(parent) = parent_window_handle(window_id) else {
                         continue;
                     };
                     let options = WebviewOptions {
@@ -316,12 +425,15 @@ pub fn ext_webview_panel(window_tab_data: Rc<WindowTabData>) -> impl View {
                     html_state.borrow_mut().remove(&h);
                 }
             }
-            // Only the active webview is visible.
+            // Only the active webview is visible, and only while the dock is open.
+            let dock_open = ide_ext.dock_visible.get();
             let handles: Vec<String> =
                 html_state.borrow().keys().cloned().collect();
             for h in handles {
-                controller
-                    .set_visible(webview_id_for(&h), active.as_deref() == Some(&h));
+                controller.set_visible(
+                    webview_id_for(&h),
+                    dock_open && active.as_deref() == Some(&h),
+                );
             }
         });
     }
@@ -347,6 +459,63 @@ pub fn ext_webview_panel(window_tab_data: Rc<WindowTabData>) -> impl View {
             if max != last {
                 drained.set(max);
             }
+        });
+    }
+
+    // Render self-test (opt-in via IDE_WEBVIEW_SELFTEST): once a webview is
+    // attached and the dock is open, probe the live DOM and log the result, so a
+    // smoke test can prove the page actually rendered (not blank) from outside
+    // the WKWebView's separate GPU surface.
+    if std::env::var_os("IDE_WEBVIEW_SELFTEST").is_some() {
+        // Auto-reveal the dock once a webview exists so the probe can run and a
+        // screenshot captures rendered content. Default builds keep it hidden.
+        {
+            let ide_ext = ide_ext.clone();
+            create_effect(move |_| {
+                let has_webview =
+                    ide_ext.webviews.with(|m| !m.is_empty());
+                if has_webview && !ide_ext.dock_visible.get_untracked() {
+                    ide_ext.show_dock(None);
+                }
+            });
+        }
+        let ide_ext = ide_ext.clone();
+        let controller = controller.clone();
+        let probed: Rc<RefCell<std::collections::HashSet<WebviewId>>> =
+            Rc::new(RefCell::new(std::collections::HashSet::new()));
+        create_effect(move |_| {
+            if !ide_ext.dock_visible.get() {
+                return;
+            }
+            let Some(handle) = ide_ext.active_webview.get() else {
+                return;
+            };
+            let id = webview_id_for(&handle);
+            if !controller.is_attached(id) {
+                return;
+            }
+            if !probed.borrow_mut().insert(id) {
+                return;
+            }
+            let controller = controller.clone();
+            floem::action::exec_after(
+                std::time::Duration::from_millis(6000),
+                move |_| {
+                    let h = handle.clone();
+                    let _ = controller.evaluate(
+                        id,
+                        "JSON.stringify({\
+                         nodes:document.querySelectorAll('*').length,\
+                         scripts:document.querySelectorAll('script').length,\
+                         textLen:(document.body?document.body.innerText.length:0),\
+                         title:document.title,\
+                         text:(document.body?document.body.innerText:'').replace(/\\s+/g,' ').slice(0,180)})",
+                        move |res| {
+                            eprintln!("[webview-selftest] {h} => {res}");
+                        },
+                    );
+                },
+            );
         });
     }
 
@@ -392,11 +561,11 @@ pub fn ext_webview_panel(window_tab_data: Rc<WindowTabData>) -> impl View {
                 None => empty().into_any(),
             },
         )
-        .style(|s| s.flex_grow(1.0).size_full()),
+        .style(|s| s.flex_grow(1.0_f32).size_full()),
     ))
     .style(move |s| {
         let config = config.get();
-        let visible = ide_ext_style.active_webview.get().is_some();
+        let visible = ide_ext_style.dock_visible.get();
         let s = s
             .flex_col()
             .height_full()

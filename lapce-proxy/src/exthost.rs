@@ -15,7 +15,7 @@
 
 use std::{
     io::{BufRead, BufReader, Write},
-    os::unix::net::UnixStream,
+    os::unix::{net::UnixStream, process::CommandExt},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
@@ -142,7 +142,8 @@ impl ExtHost {
         let control_socket = config.data_dir.join("control.sock");
         let _ = std::fs::remove_file(&control_socket);
 
-        let mut child = Command::new(&config.node)
+        let mut command = Command::new(&config.node);
+        command
             .arg(&config.host_js)
             .arg("--control-socket")
             .arg(&control_socket)
@@ -152,11 +153,22 @@ impl ExtHost {
             .arg(&config.data_dir)
             .arg("--home")
             .arg(&config.home)
+            // Tell the host which process to watch: when we die (even by
+            // SIGKILL, so neither `Drop` nor the shutdown hook runs) the host
+            // notices the parent pid is gone and tears its whole process group
+            // down. This is what stops orphaned `node host.js` processes from
+            // keeping an inherited stdout pipe open and hanging `cargo test`.
+            .arg("--parent-pid")
+            .arg(std::process::id().to_string())
             .env("HOME", &config.home)
             .env("IDE_DATA_DIR", &config.data_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        // Put the host (and the language servers it spawns) in its own process
+        // group so we can signal the entire tree at once on shutdown.
+        command.process_group(0);
+        let mut child = command
             .spawn()
             .map_err(|e| anyhow!("failed to spawn extension host: {e}"))?;
 
@@ -212,6 +224,14 @@ impl ExtHost {
 
 impl Drop for ExtHost {
     fn drop(&mut self) {
+        // Kill the whole process group (host + language servers it spawned),
+        // not just the host process. The child is its own group leader
+        // (`process_group(0)`), so a negative pid signals the entire group.
+        let pid = self.child.id() as i32;
+        // SAFETY: `kill(2)` with a negative pid targets the process group.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -270,6 +290,22 @@ fn log_unavailable(reason: &str) {
             "shared extension host unavailable ({reason}); \
              the IDE will run without VS Code extensions"
         );
+    }
+}
+
+/// Whether the shared extension host should be spawned for this process.
+///
+/// Opt-in via the `IDE_EXTHOST_ENABLE` environment variable so that unit/
+/// integration tests which don't exercise extensions never spawn `node`. The
+/// `ide` binary sets it on by default; the exthost integration test sets it
+/// explicitly. Any value other than empty / `0` / `false` enables it.
+pub fn enabled() -> bool {
+    match std::env::var("IDE_EXTHOST_ENABLE") {
+        Ok(v) => {
+            let v = v.trim();
+            !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+        }
+        Err(_) => false,
     }
 }
 

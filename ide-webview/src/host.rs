@@ -159,6 +159,20 @@ impl Handle {
             .map_err(|e| WebviewError::Backend(e.to_string()))
     }
 
+    /// Evaluate `js` in the page, delivering the result (as returned by
+    /// `JSON.stringify`/the JS engine, a string) to `cb` on the main thread.
+    /// Used to verify that the page actually rendered (DOM node count, body
+    /// text) from outside the webview.
+    pub fn evaluate(
+        &self,
+        js: &str,
+        cb: impl Fn(String) + Send + 'static,
+    ) -> Result<(), WebviewError> {
+        self.webview
+            .evaluate_script_with_callback(js, cb)
+            .map_err(|e| WebviewError::Backend(e.to_string()))
+    }
+
     /// Dispose the webview, removing it from its parent window.
     pub fn dispose(self) {
         // Dropping `WebView` detaches and releases the native view.

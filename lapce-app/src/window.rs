@@ -40,6 +40,9 @@ pub struct WindowInfo {
 
 #[derive(Clone)]
 pub struct WindowCommonData {
+    /// The floem window this data belongs to (used to parent native webviews
+    /// to the right window when several are open).
+    pub window_id: WindowId,
     pub window_command: Listener<WindowCommand>,
     pub window_scale: RwSignal<f64>,
     pub size: RwSignal<Size>,
@@ -112,6 +115,7 @@ impl WindowData {
         let hide_cursor = cx.create_rw_signal(false);
 
         let common = Rc::new(WindowCommonData {
+            window_id,
             window_command,
             window_scale,
             size,

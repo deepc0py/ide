@@ -956,6 +956,10 @@ impl WindowTabData {
             }
             ToggleInlayHints => {}
 
+            ToggleExtensionWebview => {
+                self.ide_ext.toggle_dock();
+            }
+
             // ==== Window ====
             ReloadWindow => {
                 self.common.window_common.window_command.send(
